@@ -3,7 +3,6 @@ package com.tazkia.ai.blurfilter.service
 import android.accessibilityservice.AccessibilityService
 import android.content.Intent
 import android.view.accessibility.AccessibilityEvent
-import androidx.localbroadcastmanager.content.LocalBroadcastManager
 
 class AccessibilityMonitorService : AccessibilityService() {
 
@@ -21,7 +20,7 @@ class AccessibilityMonitorService : AccessibilityService() {
         when (event.eventType) {
             AccessibilityEvent.TYPE_VIEW_SCROLLED -> {
                 // Notify about scroll event
-                sendBroadcast(ACTION_SCROLL_EVENT)
+                sendBroadcast(Intent(ACTION_SCROLL_EVENT))
             }
 
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
@@ -42,14 +41,5 @@ class AccessibilityMonitorService : AccessibilityService() {
 
     override fun onInterrupt() {
         // Service interrupted
-    }
-
-    private fun sendBroadcast(action: String) {
-        val intent = Intent(action)
-        LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
-    }
-
-    private fun sendBroadcast(intent: Intent) {
-        LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
     }
 }

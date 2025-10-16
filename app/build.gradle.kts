@@ -68,14 +68,8 @@ dependencies {
     implementation("org.tensorflow:tensorflow-lite-gpu:2.14.0")
     implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
 
-    // OpenCV
-    implementation("org.opencv:opencv:4.8.0")
-
     // Preferences
     implementation("androidx.preference:preference-ktx:1.2.1")
-
-    // LocalBroadcastManager
-    implementation("androidx.localbroadcastmanager:localbroadcastmanager:1.1.0")
 
     // Testing
     testImplementation("junit:junit:4.13.2")

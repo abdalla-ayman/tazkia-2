@@ -1,16 +1,23 @@
 package com.tazkia.ai.blurfilter.ui
 
 import android.os.Bundle
+import android.view.View
+import android.widget.RadioGroup
+import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
-import com.tazkia.ai.blurfilter.BuildConfig
+import androidx.appcompat.widget.SwitchCompat
 import com.tazkia.ai.blurfilter.R
-import com.tazkia.ai.blurfilter.databinding.ActivitySettingsBinding
 import com.tazkia.ai.blurfilter.utils.PreferenceManager
 
 class SettingsActivity : AppCompatActivity() {
 
-    private lateinit var binding: ActivitySettingsBinding
     private lateinit var prefManager: PreferenceManager
+
+    // UI Elements
+    private lateinit var switchGpu: SwitchCompat
+    private lateinit var switchAdaptiveFps: SwitchCompat
+    private lateinit var radioGroupResolution: RadioGroup
+    private lateinit var tvVersion: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -18,47 +25,54 @@ class SettingsActivity : AppCompatActivity() {
         prefManager = PreferenceManager(this)
         LanguageHelper.setLanguage(this, prefManager.language)
 
-        binding = ActivitySettingsBinding.inflate(layoutInflater)
-        setContentView(binding.root)
+        setContentView(R.layout.activity_settings)
 
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
         supportActionBar?.title = getString(R.string.settings_title)
 
+        initializeViews()
         loadSettings()
         setupListeners()
     }
 
+    private fun initializeViews() {
+        switchGpu = findViewById(R.id.switchGpu)
+        switchAdaptiveFps = findViewById(R.id.switchAdaptiveFps)
+        radioGroupResolution = findViewById(R.id.radioGroupResolution)
+        tvVersion = findViewById(R.id.tvVersion)
+    }
+
     private fun loadSettings() {
         // GPU setting
-        binding.switchGpu.isChecked = prefManager.useGpu
+        switchGpu.isChecked = prefManager.useGpu
 
         // Adaptive FPS
-        binding.switchAdaptiveFps.isChecked = prefManager.adaptiveFps
+        switchAdaptiveFps.isChecked = prefManager.adaptiveFps
 
         // Resolution
         when (prefManager.processingResolution) {
-            PreferenceManager.RESOLUTION_LOW -> binding.radioResLow.isChecked = true
-            PreferenceManager.RESOLUTION_MEDIUM -> binding.radioResMedium.isChecked = true
-            PreferenceManager.RESOLUTION_HIGH -> binding.radioResHigh.isChecked = true
+            PreferenceManager.RESOLUTION_LOW -> findViewById<View>(R.id.radioResLow).performClick()
+            PreferenceManager.RESOLUTION_MEDIUM -> findViewById<View>(R.id.radioResMedium).performClick()
+            PreferenceManager.RESOLUTION_HIGH -> findViewById<View>(R.id.radioResHigh).performClick()
         }
 
-        // Version
-        binding.tvVersion.text = "${getString(R.string.version)} ${BuildConfig.VERSION_NAME}"
+        // Version - using hardcoded version since BuildConfig might not be available yet
+        tvVersion.text = "${getString(R.string.version)} 1.0"
     }
 
     private fun setupListeners() {
         // GPU switch
-        binding.switchGpu.setOnCheckedChangeListener { _, isChecked ->
+        switchGpu.setOnCheckedChangeListener { _, isChecked ->
             prefManager.useGpu = isChecked
         }
 
         // Adaptive FPS switch
-        binding.switchAdaptiveFps.setOnCheckedChangeListener { _, isChecked ->
+        switchAdaptiveFps.setOnCheckedChangeListener { _, isChecked ->
             prefManager.adaptiveFps = isChecked
         }
 
         // Resolution radio group
-        binding.radioGroupResolution.setOnCheckedChangeListener { _, checkedId ->
+        radioGroupResolution.setOnCheckedChangeListener { _, checkedId ->
             prefManager.processingResolution = when (checkedId) {
                 R.id.radioResLow -> PreferenceManager.RESOLUTION_LOW
                 R.id.radioResHigh -> PreferenceManager.RESOLUTION_HIGH

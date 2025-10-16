@@ -8,10 +8,6 @@ import android.renderscript.Allocation
 import android.renderscript.Element
 import android.renderscript.RenderScript
 import android.renderscript.ScriptIntrinsicBlur
-import org.opencv.android.Utils
-import org.opencv.core.Mat
-import org.opencv.core.Size
-import org.opencv.imgproc.Imgproc
 import java.nio.ByteBuffer
 import kotlin.math.sqrt
 
@@ -30,49 +26,6 @@ object ImageUtils {
             targetHeight,
             true
         )
-    }
-
-    /**
-     * Apply Gaussian blur using OpenCV
-     */
-    fun applyGaussianBlur(bitmap: Bitmap, intensity: Int): Bitmap {
-        val mat = Mat()
-        Utils.bitmapToMat(bitmap, mat)
-
-        val kernelSize = (intensity * 4 + 1).toDouble() // Convert to odd number
-        Imgproc.GaussianBlur(
-            mat,
-            mat,
-            Size(kernelSize, kernelSize),
-            0.0
-        )
-
-        val result = Bitmap.createBitmap(bitmap.width, bitmap.height, bitmap.config)
-        Utils.matToBitmap(mat, result)
-        mat.release()
-
-        return result
-    }
-
-    /**
-     * Apply fast blur using box filter (faster than Gaussian)
-     */
-    fun applyFastBlur(bitmap: Bitmap, intensity: Int): Bitmap {
-        val mat = Mat()
-        Utils.bitmapToMat(bitmap, mat)
-
-        val kernelSize = (intensity * 3 + 1).toDouble()
-        Imgproc.blur(
-            mat,
-            mat,
-            Size(kernelSize, kernelSize)
-        )
-
-        val result = Bitmap.createBitmap(bitmap.width, bitmap.height, bitmap.config)
-        Utils.matToBitmap(mat, result)
-        mat.release()
-
-        return result
     }
 
     /**
@@ -101,7 +54,7 @@ object ImageUtils {
     }
 
     /**
-     * Apply pixelation effect
+     * Apply pixelation effect (Alternative to blur)
      */
     fun applyPixelation(bitmap: Bitmap, pixelSize: Int): Bitmap {
         val width = bitmap.width
