@@ -1,0 +1,69 @@
+<resources>
+    <!-- App Name -->
+    <string name="app_name">تزكية</string>
+
+    <!-- Main Screen -->
+    <string name="welcome_title">مرحباً بك في تزكية</string>
+    <string name="welcome_subtitle">فلتر المحتوى الذكي</string>
+    <string name="mode_label">وضع الكشف</string>
+    <string name="mode_hybrid">مختلط (موصى به)</string>
+    <string name="mode_media_projection">التقاط الشاشة فقط</string>
+    <string name="filter_target_label">هدف التصفية</string>
+    <string name="filter_women">طمس النساء</string>
+    <string name="filter_men">طمس الرجال</string>
+    <string name="blur_intensity_label">شدة الطمس</string>
+    <string name="start_protection">بدء الحماية</string>
+    <string name="stop_protection">إيقاف الحماية</string>
+    <string name="settings">الإعدادات</string>
+    <string name="switch_language">English</string>
+
+    <!-- Status Messages -->
+    <string name="status_idle">الحماية غير نشطة</string>
+    <string name="status_running">الحماية نشطة</string>
+    <string name="status_processing">جاري المعالجة…</string>
+
+    <!-- Permissions -->
+    <string name="permission_accessibility_title">مطلوب إذن إمكانية الوصول</string>
+    <string name="permission_accessibility_message">تحتاج تزكية إلى الوصول لإمكانية الوصول لاكتشاف التمرير أو تبديل التطبيقات. هذا يساعد على تحسين استخدام البطارية.\n\nلا يتم جمع أو نقل أي بيانات.</string>
+    <string name="permission_overlay_title">مطلوب إذن التراكب</string>
+    <string name="permission_overlay_message">تحتاج تزكية إلى إذن لعرض طبقات الطمس فوق التطبيقات الأخرى.\n\nهذه هي الطريقة التي يطبق بها التطبيق تأثير الطمس.</string>
+    <string name="permission_media_projection_title">إذن التقاط الشاشة</string>
+    <string name="permission_media_projection_message">تحتاج تزكية إلى التقاط شاشتك لتحليل المحتوى في الوقت الفعلي.\n\nتتم جميع المعالجات على جهازك. لا يتم حفظ أو مشاركة أي شيء.</string>
+    <string name="grant_permission">منح الإذن</string>
+    <string name="permission_denied">تم رفض الإذن</string>
+    <string name="permission_denied_message">لا يمكن لتزكية العمل بدون الأذونات المطلوبة.</string>
+
+    <!-- Settings -->
+    <string name="settings_title">الإعدادات</string>
+    <string name="general_settings">عام</string>
+    <string name="performance_settings">الأداء</string>
+    <string name="about">حول</string>
+    <string name="language_preference">اللغة</string>
+    <string name="language_english">الإنجليزية</string>
+    <string name="language_arabic">العربية</string>
+    <string name="fps_limit">حد معدل الإطارات</string>
+    <string name="resolution_quality">جودة المعالجة</string>
+    <string name="resolution_low">منخفض (أسرع)</string>
+    <string name="resolution_medium">متوسط</string>
+    <string name="resolution_high">عالي (بطارية)</string>
+    <string name="use_gpu">استخدام تسريع GPU</string>
+    <string name="adaptive_fps">معدل إطارات تكيفي</string>
+    <string name="version">الإصدار</string>
+    <string name="privacy_policy">سياسة الخصوصية</string>
+
+    <!-- Notifications -->
+    <string name="notification_channel_name">حماية تزكية</string>
+    <string name="notification_channel_description">يظهر عندما تكون تصفية المحتوى نشطة</string>
+    <string name="notification_title">تزكية نشطة</string>
+    <string name="notification_message">تصفية المحتوى قيد التقدم</string>
+    <string name="notification_tap_to_stop">اضغط للإيقاف</string>
+
+    <!-- Errors -->
+    <string name="error_model_loading">فشل تحميل نماذج الذكاء الاصطناعي</string>
+    <string name="error_screen_capture">فشل التقاط الشاشة</string>
+    <string name="error_unknown">حدث خطأ غير متوقع</string>
+
+    <!-- About -->
+    <string name="about_description">تزكية هو فلتر محتوى يركز على الخصوصية ويعمل بالكامل على جهازك. لا يتم جمع أو تخزين أو نقل أي بيانات.</string>
+    <string name="about_technology">التكنولوجيا: TensorFlow Lite و OpenCV و MediaProjection</string>
+</resources>

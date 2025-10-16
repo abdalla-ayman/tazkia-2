@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="detection_modes">
+        <item>@string/mode_hybrid</item>
+        <item>@string/mode_media_projection</item>
+    </string-array>
+</resources>
