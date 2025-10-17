@@ -25,9 +25,8 @@ import android.renderscript.RenderScript
 import android.util.DisplayMetrics
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
-import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.tazkia.ai.blurfilter.R
-import com.tazkia.ai.blurfilter.ml.FaceDetector
+import com.tazkia.ai.blurfilter.ml.BodyDetectorMediaPipe
 import com.tazkia.ai.blurfilter.ml.GenderClassifier
 import com.tazkia.ai.blurfilter.ml.ModelManager
 import com.tazkia.ai.blurfilter.ui.MainActivity
@@ -40,13 +39,12 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import java.nio.ByteBuffer
 
 class ScreenCaptureService : Service() {
 
     private lateinit var prefManager: PreferenceManager
     private lateinit var modelManager: ModelManager
-    private lateinit var faceDetector: FaceDetector
+    private lateinit var bodyDetector: BodyDetectorMediaPipe
     private lateinit var genderClassifier: GenderClassifier
     private lateinit var overlayService: OverlayService
     private lateinit var renderScript: RenderScript
@@ -72,6 +70,7 @@ class ScreenCaptureService : Service() {
     companion object {
         private const val NOTIFICATION_ID = 1001
         private const val CHANNEL_ID = "tazkia_protection"
+        private const val RECEIVER_NOT_EXPORTED = 0x00000004
     }
 
     // Broadcast receiver for accessibility events
@@ -103,7 +102,7 @@ class ScreenCaptureService : Service() {
             return
         }
 
-        faceDetector = FaceDetector(modelManager.getFaceDetector()!!)
+        bodyDetector = modelManager.getBodyDetector()!!
         genderClassifier = GenderClassifier(modelManager.getGenderClassifier()!!)
 
         // Get screen metrics
@@ -123,7 +122,11 @@ class ScreenCaptureService : Service() {
         val filter = IntentFilter()
         filter.addAction(AccessibilityMonitorService.ACTION_SCROLL_EVENT)
         filter.addAction(AccessibilityMonitorService.ACTION_WINDOW_CHANGE)
-        LocalBroadcastManager.getInstance(this).registerReceiver(accessibilityReceiver, filter)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(accessibilityReceiver, filter, RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(accessibilityReceiver, filter)
+        }
 
         // Start overlay service
         overlayService = OverlayService()
@@ -228,54 +231,59 @@ class ScreenCaptureService : Service() {
     }
 
     private fun processFrame(bitmap: Bitmap) {
-        // Detect faces
-        val faces = faceDetector.detectFaces(bitmap)
+        // Detect full bodies (not just faces!)
+        val bodies = bodyDetector.detectBodies(bitmap)
 
-        if (faces.isEmpty()) {
+        if (bodies.isEmpty()) {
             overlayService.clearBlur()
             return
         }
 
-        // Classify genders
-        val genderResults = genderClassifier.classifyBatch(bitmap, faces)
+        // Get orientations for better classification
+        val orientations = bodies.associate { body ->
+            body.id to bodyDetector.getBodyOrientation(body)
+        }
 
-        // Filter faces based on user preference
+        // Classify genders
+        val genderResults = genderClassifier.classifyBatch(bitmap, bodies, orientations)
+
+        // Filter bodies based on user preference
         val targetGender = when (prefManager.filterTarget) {
             PreferenceManager.FILTER_WOMEN -> GenderClassifier.GENDER_FEMALE
             PreferenceManager.FILTER_MEN -> GenderClassifier.GENDER_MALE
             else -> return
         }
 
-        val facesToBlur = faces.filter { face ->
-            val result = genderResults[face.id]
+        val bodiesToBlur = bodies.filter { body ->
+            val result = genderResults[body.id]
             result?.gender == targetGender
         }
 
-        if (facesToBlur.isEmpty()) {
+        if (bodiesToBlur.isEmpty()) {
             overlayService.clearBlur()
             return
         }
 
-        // Apply blur to matching faces
-        val blurredBitmap = applyBlurToRegions(bitmap, facesToBlur)
+        // Apply blur to matching bodies
+        val blurredBitmap = applyBlurToRegions(bitmap, bodiesToBlur)
 
         // Update overlay
-        overlayService.updateBlur(blurredBitmap, facesToBlur.map { it.rect })
+        overlayService.updateBlur(blurredBitmap, bodiesToBlur.map { it.boundingBox })
     }
 
     private fun applyBlurToRegions(
         bitmap: Bitmap,
-        regions: List<FaceDetector.Detection>
+        regions: List<BodyDetectorMediaPipe.BodyDetection>
     ): Bitmap {
         val result = bitmap.copy(bitmap.config, true)
 
         for (detection in regions) {
             try {
                 val rect = android.graphics.Rect(
-                    detection.rect.left.toInt(),
-                    detection.rect.top.toInt(),
-                    detection.rect.right.toInt(),
-                    detection.rect.bottom.toInt()
+                    detection.boundingBox.left.toInt(),
+                    detection.boundingBox.top.toInt(),
+                    detection.boundingBox.right.toInt(),
+                    detection.boundingBox.bottom.toInt()
                 )
 
                 // Crop region
@@ -373,7 +381,7 @@ class ScreenCaptureService : Service() {
         modelManager.release()
         renderScript.destroy()
 
-        LocalBroadcastManager.getInstance(this).unregisterReceiver(accessibilityReceiver)
+        unregisterReceiver(accessibilityReceiver)
 
         captureThread.quitSafely()
 

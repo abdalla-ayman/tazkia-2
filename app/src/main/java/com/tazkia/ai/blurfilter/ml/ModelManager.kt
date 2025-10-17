@@ -5,49 +5,72 @@ import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.gpu.CompatibilityList
 import org.tensorflow.lite.gpu.GpuDelegate
 import java.io.FileInputStream
-import java.nio.ByteBuffer
 import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
 
+/**
+ * Manages ML models for full body detection and gender classification
+ *
+ * ARCHITECTURE:
+ * - MediaPipe Pose: Full body detection with 33 landmarks
+ * - TensorFlow Lite: Gender classification from full body images
+ *
+ * DETECTION STRATEGY:
+ * 1. MediaPipe detects body pose and landmarks (~20-50ms)
+ * 2. Calculate bounding box from landmarks
+ * 3. Classify gender from full body region (~100ms)
+ * 4. Total: ~150ms per person
+ */
 class ModelManager(private val context: Context) {
 
-    private var faceDetectorInterpreter: Interpreter? = null
+    private var bodyDetector: BodyDetectorMediaPipe? = null
     private var genderClassifierInterpreter: Interpreter? = null
     private var gpuDelegate: GpuDelegate? = null
 
     companion object {
-        private const val FACE_DETECTOR_MODEL = "blazeface.tflite"
-        private const val GENDER_CLASSIFIER_MODEL = "mobilenetv3_gender.tflite"
+        // MediaPipe Pose models (choose one):
+        // - "pose_landmarker_lite.task" (Fast, ~20ms, good for real-time)
+        // - "pose_landmarker_full.task" (Balanced, ~30ms)
+        // - "pose_landmarker_heavy.task" (Accurate, ~50ms, better detection)
 
-        const val FACE_INPUT_SIZE = 128
+        // Gender classification model (you must provide)
+        // Train on full-body images dataset
+        private const val GENDER_CLASSIFIER_MODEL = "mobilenetv3_gender_fullbody.tflite"
+
         const val GENDER_INPUT_SIZE = 224
     }
 
     /**
-     * Initialize models
+     * Initialize both models
+     *
+     * @param useGpu Enable GPU acceleration for gender classifier
+     * @return true if initialization successful
      */
     fun initializeModels(useGpu: Boolean = true): Boolean {
         return try {
+            // Initialize MediaPipe body detector
+            bodyDetector = BodyDetectorMediaPipe(context)
+            val mediaPipeSuccess = bodyDetector?.initialize() ?: false
+
+            if (!mediaPipeSuccess) {
+                return false
+            }
+
+            // Initialize TFLite gender classifier
             val options = Interpreter.Options()
 
             // Configure threading
             options.setNumThreads(4)
 
-            // Try GPU acceleration if requested and available
+            // Try GPU acceleration
             if (useGpu && CompatibilityList().isDelegateSupportedOnThisDevice) {
                 gpuDelegate = GpuDelegate()
                 options.addDelegate(gpuDelegate)
             } else {
-                // Use NNAPI as fallback
                 options.setUseNNAPI(true)
             }
 
-            // Load models
-            faceDetectorInterpreter = Interpreter(
-                loadModelFile(FACE_DETECTOR_MODEL),
-                options
-            )
-
+            // Load gender classifier
             genderClassifierInterpreter = Interpreter(
                 loadModelFile(GENDER_CLASSIFIER_MODEL),
                 options
@@ -61,7 +84,7 @@ class ModelManager(private val context: Context) {
     }
 
     /**
-     * Load model file from assets
+     * Load TFLite model file from assets
      */
     private fun loadModelFile(modelName: String): MappedByteBuffer {
         val assetFileDescriptor = context.assets.openFd(modelName)
@@ -73,24 +96,24 @@ class ModelManager(private val context: Context) {
     }
 
     /**
-     * Get face detector interpreter
+     * Get body detector
      */
-    fun getFaceDetector(): Interpreter? = faceDetectorInterpreter
+    fun getBodyDetector(): BodyDetectorMediaPipe? = bodyDetector
 
     /**
-     * Get gender classifier interpreter
+     * Get gender classifier
      */
     fun getGenderClassifier(): Interpreter? = genderClassifierInterpreter
 
     /**
-     * Release resources
+     * Release all resources
      */
     fun release() {
-        faceDetectorInterpreter?.close()
+        bodyDetector?.close()
         genderClassifierInterpreter?.close()
         gpuDelegate?.close()
 
-        faceDetectorInterpreter = null
+        bodyDetector = null
         genderClassifierInterpreter = null
         gpuDelegate = null
     }
@@ -99,6 +122,6 @@ class ModelManager(private val context: Context) {
      * Check if models are initialized
      */
     fun isInitialized(): Boolean {
-        return faceDetectorInterpreter != null && genderClassifierInterpreter != null
+        return bodyDetector != null && genderClassifierInterpreter != null
     }
 }

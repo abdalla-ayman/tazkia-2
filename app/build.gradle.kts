@@ -63,10 +63,13 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
     implementation("androidx.lifecycle:lifecycle-service:2.7.0")
 
-    // TensorFlow Lite
+    // TensorFlow Lite (for gender classification only)
     implementation("org.tensorflow:tensorflow-lite:2.14.0")
     implementation("org.tensorflow:tensorflow-lite-gpu:2.14.0")
     implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
+
+    // MediaPipe (for body/pose detection)
+    implementation("com.google.mediapipe:tasks-vision:0.10.0")
 
     // Preferences
     implementation("androidx.preference:preference-ktx:1.2.1")
