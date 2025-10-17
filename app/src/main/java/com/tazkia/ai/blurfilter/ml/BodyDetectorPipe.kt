@@ -2,7 +2,6 @@ package com.tazkia.ai.blurfilter.ml
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.PointF
 import android.graphics.RectF
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.core.BaseOptions
@@ -122,8 +121,8 @@ class BodyDetectorMediaPipe(private val context: Context) {
                         x = landmark.x() * bitmap.width,
                         y = landmark.y() * bitmap.height,
                         z = landmark.z(),
-                        visibility = landmark.visibility().orElse(1.0f),
-                        presence = landmark.presence().orElse(1.0f)
+                        visibility = if (landmark.visibility().isPresent) landmark.visibility().get() else 1.0f,
+                        presence = if (landmark.presence().isPresent) landmark.presence().get() else 1.0f
                     )
                 }
 

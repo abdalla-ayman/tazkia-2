@@ -29,7 +29,7 @@ import com.tazkia.ai.blurfilter.R
 import com.tazkia.ai.blurfilter.ml.BodyDetectorMediaPipe
 import com.tazkia.ai.blurfilter.ml.GenderClassifier
 import com.tazkia.ai.blurfilter.ml.ModelManager
-import com.tazkia.ai.blurfilter.ui.MainActivity
+import com.tazkia.ai.blurfilter.ui.MainActivity // Add import
 import com.tazkia.ai.blurfilter.utils.ImageUtils
 import com.tazkia.ai.blurfilter.utils.PreferenceManager
 import kotlinx.coroutines.CoroutineScope
@@ -118,10 +118,11 @@ class ScreenCaptureService : Service() {
         captureThread.start()
         captureHandler = Handler(captureThread.looper)
 
-        // Register accessibility receiver
+        // Register accessibility receiver - FIXED
         val filter = IntentFilter()
         filter.addAction(AccessibilityMonitorService.ACTION_SCROLL_EVENT)
         filter.addAction(AccessibilityMonitorService.ACTION_WINDOW_CHANGE)
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(accessibilityReceiver, filter, RECEIVER_NOT_EXPORTED)
         } else {
@@ -134,7 +135,8 @@ class ScreenCaptureService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val mediaProjectionData = intent?.getParcelableExtra<Intent>("mediaProjectionData")
+        // Fix: Add explicit type
+        val mediaProjectionData: Intent? = intent?.getParcelableExtra("mediaProjectionData")
 
         if (mediaProjectionData == null) {
             stopSelf()
@@ -335,6 +337,7 @@ class ScreenCaptureService : Service() {
     private fun createNotification(): Notification {
         createNotificationChannel()
 
+        // Fix: Use correct package name
         val intent = Intent(this, MainActivity::class.java)
         val pendingIntent = PendingIntent.getActivity(
             this,
