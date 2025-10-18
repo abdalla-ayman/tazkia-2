@@ -31,28 +31,23 @@ object ImageUtils {
     /**
      * Apply RenderScript blur (GPU-accelerated, fastest option)
      */
-    fun applyRenderScriptBlur(
-        rs: RenderScript,
-        bitmap: Bitmap,
-        radius: Int
-    ): Bitmap {
+    fun applyRenderScriptBlur(rs: RenderScript, bitmap: Bitmap, radius: Int): Bitmap {
         val input = Allocation.createFromBitmap(rs, bitmap)
         val output = Allocation.createTyped(rs, input.type)
-
         val script = ScriptIntrinsicBlur.create(rs, Element.U8_4(rs))
-        script.setRadius(radius.coerceIn(1, 25).toFloat())
-        script.setInput(input)
-        script.forEach(output)
-
-        val result = Bitmap.createBitmap(bitmap.width, bitmap.height, bitmap.config)
-        output.copyTo(result)
-
-        input.destroy()
-        output.destroy()
-
-        return result
+        try {
+            script.setRadius(radius.coerceIn(1, 25).toFloat())
+            script.setInput(input)
+            script.forEach(output)
+            val result = Bitmap.createBitmap(bitmap.width, bitmap.height, bitmap.config)
+            output.copyTo(result)
+            return result
+        } finally {
+            input.destroy()
+            output.destroy()
+            script.destroy()
+        }
     }
-
     /**
      * Apply pixelation effect (Alternative to blur)
      */

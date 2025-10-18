@@ -25,11 +25,12 @@ import android.renderscript.RenderScript
 import android.util.DisplayMetrics
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
+import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.tazkia.ai.blurfilter.R
 import com.tazkia.ai.blurfilter.ml.BodyDetectorMediaPipe
 import com.tazkia.ai.blurfilter.ml.GenderClassifier
 import com.tazkia.ai.blurfilter.ml.ModelManager
-import com.tazkia.ai.blurfilter.ui.MainActivity // Add import
+import com.tazkia.ai.blurfilter.ui.MainActivity
 import com.tazkia.ai.blurfilter.utils.ImageUtils
 import com.tazkia.ai.blurfilter.utils.PreferenceManager
 import kotlinx.coroutines.CoroutineScope
@@ -70,19 +71,16 @@ class ScreenCaptureService : Service() {
     companion object {
         private const val NOTIFICATION_ID = 1001
         private const val CHANNEL_ID = "tazkia_protection"
-        private const val RECEIVER_NOT_EXPORTED = 0x00000004
     }
 
-    // Broadcast receiver for accessibility events
     private val accessibilityReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
                 AccessibilityMonitorService.ACTION_SCROLL_EVENT -> {
                     isScrolling = true
-                    currentFps = 2f // Increase FPS during scroll
+                    currentFps = 2f
                 }
                 AccessibilityMonitorService.ACTION_WINDOW_CHANGE -> {
-                    // Clear cache when app changes
                     genderClassifier.clearCache()
                 }
             }
@@ -95,7 +93,6 @@ class ScreenCaptureService : Service() {
         prefManager = PreferenceManager(this)
         renderScript = RenderScript.create(this)
 
-        // Initialize models
         modelManager = ModelManager(this)
         if (!modelManager.initializeModels(prefManager.useGpu)) {
             stopSelf()
@@ -105,7 +102,6 @@ class ScreenCaptureService : Service() {
         bodyDetector = modelManager.getBodyDetector()!!
         genderClassifier = GenderClassifier(modelManager.getGenderClassifier()!!)
 
-        // Get screen metrics
         val windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         val metrics = DisplayMetrics()
         windowManager.defaultDisplay.getRealMetrics(metrics)
@@ -113,30 +109,29 @@ class ScreenCaptureService : Service() {
         screenHeight = metrics.heightPixels
         screenDensity = metrics.densityDpi
 
-        // Setup capture thread
         captureThread = HandlerThread("CaptureThread")
         captureThread.start()
         captureHandler = Handler(captureThread.looper)
 
-        // Register accessibility receiver - FIXED
-        val filter = IntentFilter()
-        filter.addAction(AccessibilityMonitorService.ACTION_SCROLL_EVENT)
-        filter.addAction(AccessibilityMonitorService.ACTION_WINDOW_CHANGE)
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(accessibilityReceiver, filter, RECEIVER_NOT_EXPORTED)
-        } else {
-            registerReceiver(accessibilityReceiver, filter)
+        val filter = IntentFilter().apply {
+            addAction(AccessibilityMonitorService.ACTION_SCROLL_EVENT)
+            addAction(AccessibilityMonitorService.ACTION_WINDOW_CHANGE)
         }
 
-        // Start overlay service
+        // Use LocalBroadcastManager to listen for broadcasts sent via LocalBroadcastManager
+        LocalBroadcastManager.getInstance(this).registerReceiver(accessibilityReceiver, filter)
+
         overlayService = OverlayService()
         overlayService.start(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Fix: Add explicit type
-        val mediaProjectionData: Intent? = intent?.getParcelableExtra("mediaProjectionData")
+        val mediaProjectionData = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent?.getParcelableExtra("mediaProjectionData", Intent::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent?.getParcelableExtra("mediaProjectionData")
+        }
 
         if (mediaProjectionData == null) {
             stopSelf()
@@ -154,11 +149,9 @@ class ScreenCaptureService : Service() {
         val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         mediaProjection = projectionManager.getMediaProjection(android.app.Activity.RESULT_OK, data)
 
-        // Calculate processing resolution
         val processingWidth = prefManager.processingResolution
         val processingHeight = (screenHeight * processingWidth / screenWidth)
 
-        // Create ImageReader
         imageReader = ImageReader.newInstance(
             processingWidth,
             processingHeight,
@@ -166,7 +159,6 @@ class ScreenCaptureService : Service() {
             2
         )
 
-        // Create virtual display
         virtualDisplay = mediaProjection?.createVirtualDisplay(
             "TazkiaCapture",
             processingWidth,
@@ -184,16 +176,13 @@ class ScreenCaptureService : Service() {
             while (isActive) {
                 try {
                     val frameDelay = (1000 / currentFps).toLong()
-
-                    // Capture and process frame
                     captureAndProcess()
 
-                    // Reset scroll flag after processing
                     if (isScrolling) {
-                        delay(2000) // Keep high FPS for 2 seconds after scroll
+                        delay(2000)
                         isScrolling = false
                         if (prefManager.adaptiveFps) {
-                            currentFps = 0.5f // Return to low FPS
+                            currentFps = 0.5f
                         }
                     }
 
@@ -212,7 +201,6 @@ class ScreenCaptureService : Service() {
             val bitmap = imageToBitmap(image)
             image.close()
 
-            // Quick motion detection
             val currentHash = ImageUtils.calculateHash(bitmap)
 
             if (!prefManager.adaptiveFps ||
@@ -221,7 +209,6 @@ class ScreenCaptureService : Service() {
                 lastFrameHash = currentHash
                 processFrame(bitmap)
             } else {
-                // No significant change, clear overlay
                 overlayService.clearBlur()
             }
 
@@ -233,7 +220,6 @@ class ScreenCaptureService : Service() {
     }
 
 //    private fun processFrame(bitmap: Bitmap) {
-//        // Detect full bodies (not just faces!)
 //        val bodies = bodyDetector.detectBodies(bitmap)
 //
 //        if (bodies.isEmpty()) {
@@ -241,15 +227,12 @@ class ScreenCaptureService : Service() {
 //            return
 //        }
 //
-//        // Get orientations for better classification
 //        val orientations = bodies.associate { body ->
 //            body.id to bodyDetector.getBodyOrientation(body)
 //        }
 //
-//        // Classify genders
 //        val genderResults = genderClassifier.classifyBatch(bitmap, bodies, orientations)
 //
-//        // Filter bodies based on user preference
 //        val targetGender = when (prefManager.filterTarget) {
 //            PreferenceManager.FILTER_WOMEN -> GenderClassifier.GENDER_FEMALE
 //            PreferenceManager.FILTER_MEN -> GenderClassifier.GENDER_MALE
@@ -266,37 +249,23 @@ class ScreenCaptureService : Service() {
 //            return
 //        }
 //
-//        // Apply blur to matching bodies
 //        val blurredBitmap = applyBlurToRegions(bitmap, bodiesToBlur)
-//
-//        // Update overlay
 //        overlayService.updateBlur(blurredBitmap, bodiesToBlur.map { it.boundingBox })
 //    }
-private fun processFrame(bitmap: Bitmap) {
-    // Detect full bodies (not just faces!)
-    val bodies = bodyDetector.detectBodies(bitmap)
 
-    // DEBUG: Print detection results
-    println("DEBUG: Found ${bodies.size} bodies in frame")
+    private fun processFrame(bitmap: Bitmap) {
+        val bodies = bodyDetector.detectBodies(bitmap)
 
-    if (bodies.isEmpty()) {
-        overlayService.clearBlur()
-        return
+        if (bodies.isEmpty()) {
+            overlayService.clearBlur()
+            return
+        }
+
+        // Blur all detected bodies, no gender classification
+        val blurredBitmap = applyBlurToRegions(bitmap, bodies)
+        overlayService.updateBlur(blurredBitmap, bodies.map { it.boundingBox })
     }
 
-    // TEMPORARY: Blur ALL detected bodies (for testing)
-    // Remove this when classification model is available
-    val bodiesToBlur = bodies // Blur all instead of filtering by gender
-
-    // DEBUG: Print blur targets
-    println("DEBUG: Blurring ${bodiesToBlur.size} bodies")
-
-    // Apply blur to ALL matching bodies
-    val blurredBitmap = applyBlurToRegions(bitmap, bodiesToBlur)
-
-    // Update overlay
-    overlayService.updateBlur(blurredBitmap, bodiesToBlur.map { it.boundingBox })
-}
     private fun applyBlurToRegions(
         bitmap: Bitmap,
         regions: List<BodyDetectorMediaPipe.BodyDetection>
@@ -312,10 +281,7 @@ private fun processFrame(bitmap: Bitmap) {
                     detection.boundingBox.bottom.toInt()
                 )
 
-                // Crop region
                 val regionBitmap = ImageUtils.cropRegion(result, rect)
-
-                // Apply blur using RenderScript (fastest)
                 val blurRadius = (prefManager.blurIntensity * 2.5f).toInt().coerceIn(1, 25)
                 val blurred = ImageUtils.applyRenderScriptBlur(
                     renderScript,
@@ -323,7 +289,6 @@ private fun processFrame(bitmap: Bitmap) {
                     blurRadius
                 )
 
-                // Draw blurred region back
                 val canvas = android.graphics.Canvas(result)
                 canvas.drawBitmap(blurred, rect.left.toFloat(), rect.top.toFloat(), null)
 
@@ -361,7 +326,6 @@ private fun processFrame(bitmap: Bitmap) {
     private fun createNotification(): Notification {
         createNotificationChannel()
 
-        // Fix: Use correct package name
         val intent = Intent(this, MainActivity::class.java)
         val pendingIntent = PendingIntent.getActivity(
             this,
@@ -408,7 +372,8 @@ private fun processFrame(bitmap: Bitmap) {
         modelManager.release()
         renderScript.destroy()
 
-        unregisterReceiver(accessibilityReceiver)
+        // Unregister from LocalBroadcastManager
+        LocalBroadcastManager.getInstance(this).unregisterReceiver(accessibilityReceiver)
 
         captureThread.quitSafely()
 

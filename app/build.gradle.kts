@@ -10,7 +10,7 @@ android {
     defaultConfig {
         applicationId = "com.tazkia.ai.blurfilter"
         minSdk = 26
-        targetSdk = 34  // Keep this as 34 (not 35)
+        targetSdk = 34
         versionCode = 1
         versionName = "1.0"
 
@@ -45,9 +45,6 @@ android {
             useLegacyPackaging = true
         }
     }
-
-    // NO ABI Splits - Let Android handle all architectures
-    // This ensures 16KB compatibility for Google Play
 }
 
 dependencies {
@@ -65,13 +62,13 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
     implementation("androidx.lifecycle:lifecycle-service:2.7.0")
 
-    // TensorFlow Lite (updated version that supports 16KB)
+    // TensorFlow Lite
     implementation("org.tensorflow:tensorflow-lite:2.16.1")
     implementation("org.tensorflow:tensorflow-lite-gpu:2.16.1")
     implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
 
-    // MediaPipe (updated version that supports 16KB)
-    implementation("com.google.mediapipe:tasks-vision:0.10.16")
+    // MediaPipe - Use the correct version
+    implementation("com.google.mediapipe:tasks-vision:0.10.11")
 
     // Preferences
     implementation("androidx.preference:preference-ktx:1.2.1")

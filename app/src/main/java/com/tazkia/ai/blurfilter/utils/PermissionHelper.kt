@@ -37,21 +37,17 @@ object PermissionHelper {
     /**
      * Request overlay permission
      */
-    fun requestOverlayPermission(activity: Activity) {
+    fun requestOverlayPermission(activity: Activity, launcher: ActivityResultLauncher<Intent>) {
         AlertDialog.Builder(activity)
             .setTitle(R.string.permission_overlay_title)
             .setMessage(R.string.permission_overlay_message)
             .setPositiveButton(R.string.grant_permission) { _, _ ->
-                val intent = Intent(
-                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:${activity.packageName}")
-                )
-                activity.startActivityForResult(intent, REQUEST_OVERLAY_PERMISSION)
+                val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${activity.packageName}"))
+                launcher.launch(intent)
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
     }
-
     /**
      * Request accessibility permission
      */

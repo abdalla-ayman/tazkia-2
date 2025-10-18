@@ -41,13 +41,11 @@ class PreferenceManager(context: Context) {
     // Mode
     var detectionMode: Int
         get() = prefs.getInt(KEY_MODE, MODE_HYBRID)
-        set(value) = prefs.edit().putInt(KEY_MODE, value).apply()
-
+        set(value) = prefs.edit().putInt(KEY_MODE, value.coerceIn(MODE_HYBRID, MODE_MEDIA_PROJECTION_ONLY)).apply()
     // Filter target
     var filterTarget: Int
         get() = prefs.getInt(KEY_FILTER_TARGET, FILTER_WOMEN)
-        set(value) = prefs.edit().putInt(KEY_FILTER_TARGET, value).apply()
-
+        set(value) = prefs.edit().putInt(KEY_FILTER_TARGET, value.coerceIn(FILTER_WOMEN, FILTER_MEN)).apply()
     // Blur intensity (1-10)
     var blurIntensity: Int
         get() = prefs.getInt(KEY_BLUR_INTENSITY, 5)

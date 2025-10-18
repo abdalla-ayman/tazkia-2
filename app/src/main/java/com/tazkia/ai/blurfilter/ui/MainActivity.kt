@@ -1,9 +1,9 @@
 package com.tazkia.ai.blurfilter.ui
 
 import android.app.Activity
-import android.app.AlertDialog
 import android.content.Intent
 import android.os.Bundle
+import android.util.Log
 import android.view.View
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
@@ -29,6 +29,22 @@ class MainActivity : AppCompatActivity() {
             result.data?.let { data ->
                 startProtection(data)
             }
+        } else {
+            Log.w("MainActivity", "Media projection permission denied")
+            updateUIState()
+        }
+    }
+
+    private val overlayPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (PermissionHelper.hasOverlayPermission(this)) {
+            Log.i("MainActivity", "Overlay permission granted")
+            checkPermissionsAndStart()
+        } else {
+            Log.w("MainActivity", "Overlay permission denied")
+            binding.tvPermissionStatus.text = getString(R.string.permissions_none_granted)
+            updatePermissionIndicator(false, PermissionHelper.isAccessibilityServiceEnabled(this))
         }
     }
 
@@ -152,7 +168,7 @@ class MainActivity : AppCompatActivity() {
             binding.spinnerMode.isEnabled = false
             binding.radioGroupFilter.isEnabled = false
             binding.seekBarBlur.isEnabled = false
-            binding.btnRefresh.isEnabled = false // Disable refresh while protection is running
+            binding.btnRefresh.isEnabled = false
         } else {
             binding.tvStatus.text = getString(R.string.status_idle)
             binding.statusIndicator.setBackgroundResource(android.R.drawable.presence_offline)
@@ -167,20 +183,19 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun checkPermissionsAndStart() {
-        // Check overlay permission
+        Log.d("MainActivity", "Checking permissions...")
         if (!PermissionHelper.hasOverlayPermission(this)) {
-            PermissionHelper.requestOverlayPermission(this)
+            Log.i("MainActivity", "Requesting overlay permission")
+            PermissionHelper.requestOverlayPermission(this, overlayPermissionLauncher)
             return
         }
-
-        // Check accessibility permission (recommended but not required)
         if (prefManager.detectionMode == PreferenceManager.MODE_HYBRID &&
             !PermissionHelper.isAccessibilityServiceEnabled(this)) {
+            Log.i("MainActivity", "Requesting accessibility permission")
             PermissionHelper.requestAccessibilityPermission(this)
             return
         }
-
-        // Request media projection
+        Log.i("MainActivity", "Requesting media projection")
         PermissionHelper.requestMediaProjection(this, mediaProjectionLauncher)
     }
 
@@ -210,18 +225,10 @@ class MainActivity : AppCompatActivity() {
 
         // Update permission status text
         val statusText = when {
-            overlayGranted && accessibilityGranted -> {
-                getString(R.string.permissions_all_granted)
-            }
-            overlayGranted -> {
-                getString(R.string.permissions_overlay_only)
-            }
-            accessibilityGranted -> {
-                getString(R.string.permissions_accessibility_only)
-            }
-            else -> {
-                getString(R.string.permissions_none_granted)
-            }
+            overlayGranted && accessibilityGranted -> getString(R.string.permissions_all_granted)
+            overlayGranted -> getString(R.string.permissions_overlay_only)
+            accessibilityGranted -> getString(R.string.permissions_accessibility_only)
+            else -> getString(R.string.permissions_none_granted)
         }
 
         binding.tvPermissionStatus.text = statusText
@@ -233,27 +240,29 @@ class MainActivity : AppCompatActivity() {
     private fun updatePermissionIndicator(overlayGranted: Boolean, accessibilityGranted: Boolean) {
         when {
             overlayGranted && accessibilityGranted -> {
-                // Green - all permissions granted
                 binding.statusIndicator.setBackgroundResource(android.R.drawable.presence_online)
             }
             overlayGranted || accessibilityGranted -> {
-                // Yellow - some permissions granted
                 binding.statusIndicator.setBackgroundResource(android.R.drawable.presence_away)
             }
             else -> {
-                // Red - no permissions granted
                 binding.statusIndicator.setBackgroundResource(android.R.drawable.presence_busy)
             }
         }
     }
 
+    @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-
         when (requestCode) {
             PermissionHelper.REQUEST_OVERLAY_PERMISSION -> {
                 if (PermissionHelper.hasOverlayPermission(this)) {
+                    Log.i("MainActivity", "Overlay permission granted via onActivityResult")
                     checkPermissionsAndStart()
+                } else {
+                    Log.w("MainActivity", "Overlay permission denied via onActivityResult")
+                    binding.tvPermissionStatus.text = getString(R.string.permissions_none_granted)
+                    updatePermissionIndicator(false, PermissionHelper.isAccessibilityServiceEnabled(this))
                 }
             }
         }

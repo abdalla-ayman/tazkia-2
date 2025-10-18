@@ -30,7 +30,7 @@ class BodyDetectorMediaPipe(private val context: Context) {
     private var detector: PoseLandmarker? = null
 
     companion object {
-        private const val MODEL_NAME = "pose_landmarker_heavy.task" // or "pose_landmarker_lite.task" for faster
+        private const val MODEL_NAME = "pose_landmarker_lite.task" //
         private const val MIN_DETECTION_CONFIDENCE = 0.5f
         private const val MIN_TRACKING_CONFIDENCE = 0.5f
         private const val MIN_PRESENCE_CONFIDENCE = 0.5f
@@ -112,7 +112,7 @@ class BodyDetectorMediaPipe(private val context: Context) {
             println("DEBUG: Processing image ${bitmap.width}x${bitmap.height}")
             // Run pose detection (~20-30ms for lite, ~50ms for heavy)
             val result = mpDetector.detect(mpImage)
-
+            mpImage.close() // Release MediaPipe image
 
             // Convert results to our format
             val detections = mutableListOf<BodyDetection>()
@@ -240,8 +240,7 @@ class BodyDetectorMediaPipe(private val context: Context) {
             landmarks[RIGHT_HIP]
         )
 
-        return keyLandmarks.map { it.visibility }.average().toFloat()
-    }
+        return if (keyLandmarks.isEmpty()) 0f else keyLandmarks.map { it.visibility }.average().toFloat()    }
 
     /**
      * Generate unique ID for body

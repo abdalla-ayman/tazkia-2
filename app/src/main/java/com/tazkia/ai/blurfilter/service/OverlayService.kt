@@ -1,5 +1,6 @@
 package com.tazkia.ai.blurfilter.service
 
+import android.app.Service
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -10,7 +11,7 @@ import android.os.Build
 import android.view.View
 import android.view.WindowManager
 
-class OverlayService {
+class OverlayService :Service() {
 
     private var windowManager: WindowManager? = null
     private var overlayView: OverlayView? = null
@@ -74,7 +75,6 @@ class OverlayService {
         }
 
         fun updateBlur(bitmap: Bitmap?, regions: List<RectF>) {
-            // Clean up old bitmap
             blurredBitmap?.recycle()
 
             blurredBitmap = bitmap
@@ -96,7 +96,6 @@ class OverlayService {
                 return
             }
 
-            // Scale regions to screen size
             val scaleX = width.toFloat() / (blurredBitmap?.width ?: 1)
             val scaleY = height.toFloat() / (blurredBitmap?.height ?: 1)
 
@@ -109,7 +108,6 @@ class OverlayService {
                 )
 
                 try {
-                    // Draw the blurred region
                     val srcRect = android.graphics.Rect(
                         region.left.toInt(),
                         region.top.toInt(),
@@ -132,4 +130,8 @@ class OverlayService {
             blurredBitmap = null
         }
     }
+    override fun onBind(intent: android.content.Intent?): android.os.IBinder? {
+        return null
+    }
+
 }
