@@ -10,7 +10,7 @@ android {
     defaultConfig {
         applicationId = "com.tazkia.ai.blurfilter"
         minSdk = 26
-        targetSdk = 34
+        targetSdk = 34  // Keep this as 34 (not 35)
         versionCode = 1
         versionName = "1.0"
 
@@ -40,12 +40,14 @@ android {
         viewBinding = true
     }
 
-    // Add this for native libraries (OpenCV)
-    packaging {
+    packagingOptions {
         jniLibs {
             useLegacyPackaging = true
         }
     }
+
+    // NO ABI Splits - Let Android handle all architectures
+    // This ensures 16KB compatibility for Google Play
 }
 
 dependencies {
@@ -63,13 +65,13 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
     implementation("androidx.lifecycle:lifecycle-service:2.7.0")
 
-    // TensorFlow Lite (for gender classification only)
-    implementation("org.tensorflow:tensorflow-lite:2.14.0")
-    implementation("org.tensorflow:tensorflow-lite-gpu:2.14.0")
+    // TensorFlow Lite (updated version that supports 16KB)
+    implementation("org.tensorflow:tensorflow-lite:2.16.1")
+    implementation("org.tensorflow:tensorflow-lite-gpu:2.16.1")
     implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
 
-    // MediaPipe (for body/pose detection)
-    implementation("com.google.mediapipe:tasks-vision:0.10.14")
+    // MediaPipe (updated version that supports 16KB)
+    implementation("com.google.mediapipe:tasks-vision:0.10.16")
 
     // Preferences
     implementation("androidx.preference:preference-ktx:1.2.1")

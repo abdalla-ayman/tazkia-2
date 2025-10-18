@@ -108,8 +108,11 @@ class BodyDetectorMediaPipe(private val context: Context) {
             // Convert to MediaPipe image format
             val mpImage = BitmapImageBuilder(bitmap).build()
 
+            // DEBUG: Print image size
+            println("DEBUG: Processing image ${bitmap.width}x${bitmap.height}")
             // Run pose detection (~20-30ms for lite, ~50ms for heavy)
             val result = mpDetector.detect(mpImage)
+
 
             // Convert results to our format
             val detections = mutableListOf<BodyDetection>()

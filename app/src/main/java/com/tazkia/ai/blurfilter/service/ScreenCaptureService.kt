@@ -232,47 +232,71 @@ class ScreenCaptureService : Service() {
         }
     }
 
-    private fun processFrame(bitmap: Bitmap) {
-        // Detect full bodies (not just faces!)
-        val bodies = bodyDetector.detectBodies(bitmap)
+//    private fun processFrame(bitmap: Bitmap) {
+//        // Detect full bodies (not just faces!)
+//        val bodies = bodyDetector.detectBodies(bitmap)
+//
+//        if (bodies.isEmpty()) {
+//            overlayService.clearBlur()
+//            return
+//        }
+//
+//        // Get orientations for better classification
+//        val orientations = bodies.associate { body ->
+//            body.id to bodyDetector.getBodyOrientation(body)
+//        }
+//
+//        // Classify genders
+//        val genderResults = genderClassifier.classifyBatch(bitmap, bodies, orientations)
+//
+//        // Filter bodies based on user preference
+//        val targetGender = when (prefManager.filterTarget) {
+//            PreferenceManager.FILTER_WOMEN -> GenderClassifier.GENDER_FEMALE
+//            PreferenceManager.FILTER_MEN -> GenderClassifier.GENDER_MALE
+//            else -> return
+//        }
+//
+//        val bodiesToBlur = bodies.filter { body ->
+//            val result = genderResults[body.id]
+//            result?.gender == targetGender
+//        }
+//
+//        if (bodiesToBlur.isEmpty()) {
+//            overlayService.clearBlur()
+//            return
+//        }
+//
+//        // Apply blur to matching bodies
+//        val blurredBitmap = applyBlurToRegions(bitmap, bodiesToBlur)
+//
+//        // Update overlay
+//        overlayService.updateBlur(blurredBitmap, bodiesToBlur.map { it.boundingBox })
+//    }
+private fun processFrame(bitmap: Bitmap) {
+    // Detect full bodies (not just faces!)
+    val bodies = bodyDetector.detectBodies(bitmap)
 
-        if (bodies.isEmpty()) {
-            overlayService.clearBlur()
-            return
-        }
+    // DEBUG: Print detection results
+    println("DEBUG: Found ${bodies.size} bodies in frame")
 
-        // Get orientations for better classification
-        val orientations = bodies.associate { body ->
-            body.id to bodyDetector.getBodyOrientation(body)
-        }
-
-        // Classify genders
-        val genderResults = genderClassifier.classifyBatch(bitmap, bodies, orientations)
-
-        // Filter bodies based on user preference
-        val targetGender = when (prefManager.filterTarget) {
-            PreferenceManager.FILTER_WOMEN -> GenderClassifier.GENDER_FEMALE
-            PreferenceManager.FILTER_MEN -> GenderClassifier.GENDER_MALE
-            else -> return
-        }
-
-        val bodiesToBlur = bodies.filter { body ->
-            val result = genderResults[body.id]
-            result?.gender == targetGender
-        }
-
-        if (bodiesToBlur.isEmpty()) {
-            overlayService.clearBlur()
-            return
-        }
-
-        // Apply blur to matching bodies
-        val blurredBitmap = applyBlurToRegions(bitmap, bodiesToBlur)
-
-        // Update overlay
-        overlayService.updateBlur(blurredBitmap, bodiesToBlur.map { it.boundingBox })
+    if (bodies.isEmpty()) {
+        overlayService.clearBlur()
+        return
     }
 
+    // TEMPORARY: Blur ALL detected bodies (for testing)
+    // Remove this when classification model is available
+    val bodiesToBlur = bodies // Blur all instead of filtering by gender
+
+    // DEBUG: Print blur targets
+    println("DEBUG: Blurring ${bodiesToBlur.size} bodies")
+
+    // Apply blur to ALL matching bodies
+    val blurredBitmap = applyBlurToRegions(bitmap, bodiesToBlur)
+
+    // Update overlay
+    overlayService.updateBlur(blurredBitmap, bodiesToBlur.map { it.boundingBox })
+}
     private fun applyBlurToRegions(
         bitmap: Bitmap,
         regions: List<BodyDetectorMediaPipe.BodyDetection>
