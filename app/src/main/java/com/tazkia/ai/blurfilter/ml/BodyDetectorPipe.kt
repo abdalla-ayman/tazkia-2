@@ -7,7 +7,7 @@ import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker
-import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarkerOptions
+import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker.PoseLandmarkerOptions
 import kotlin.math.max
 import kotlin.math.min
 
