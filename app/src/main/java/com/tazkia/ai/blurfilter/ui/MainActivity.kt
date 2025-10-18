@@ -1,6 +1,7 @@
 package com.tazkia.ai.blurfilter.ui
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.os.Bundle
 import android.view.View
@@ -47,11 +48,13 @@ class MainActivity : AppCompatActivity() {
         setupListeners()
         loadPreferences()
         updateUIState()
+        checkPermissionsStatus() // Check permissions on startup
     }
 
     override fun onResume() {
         super.onResume()
         updateUIState()
+        checkPermissionsStatus() // Check permissions when returning to app
     }
 
     private fun setupUI() {
@@ -118,6 +121,11 @@ class MainActivity : AppCompatActivity() {
             prefManager.language = newLang
             LanguageHelper.applyLanguage(this, newLang)
         }
+
+        // Refresh permissions button
+        binding.btnRefresh.setOnClickListener {
+            checkPermissionsStatus()
+        }
     }
 
     private fun loadPreferences() {
@@ -144,6 +152,7 @@ class MainActivity : AppCompatActivity() {
             binding.spinnerMode.isEnabled = false
             binding.radioGroupFilter.isEnabled = false
             binding.seekBarBlur.isEnabled = false
+            binding.btnRefresh.isEnabled = false // Disable refresh while protection is running
         } else {
             binding.tvStatus.text = getString(R.string.status_idle)
             binding.statusIndicator.setBackgroundResource(android.R.drawable.presence_offline)
@@ -153,6 +162,7 @@ class MainActivity : AppCompatActivity() {
             binding.spinnerMode.isEnabled = true
             binding.radioGroupFilter.isEnabled = true
             binding.seekBarBlur.isEnabled = true
+            binding.btnRefresh.isEnabled = true
         }
     }
 
@@ -192,6 +202,49 @@ class MainActivity : AppCompatActivity() {
         isRunning = false
         prefManager.isProtectionRunning = false
         updateUIState()
+    }
+
+    private fun checkPermissionsStatus() {
+        val overlayGranted = PermissionHelper.hasOverlayPermission(this)
+        val accessibilityGranted = PermissionHelper.isAccessibilityServiceEnabled(this)
+
+        // Update permission status text
+        val statusText = when {
+            overlayGranted && accessibilityGranted -> {
+                getString(R.string.permissions_all_granted)
+            }
+            overlayGranted -> {
+                getString(R.string.permissions_overlay_only)
+            }
+            accessibilityGranted -> {
+                getString(R.string.permissions_accessibility_only)
+            }
+            else -> {
+                getString(R.string.permissions_none_granted)
+            }
+        }
+
+        binding.tvPermissionStatus.text = statusText
+
+        // Update status indicator color based on permissions
+        updatePermissionIndicator(overlayGranted, accessibilityGranted)
+    }
+
+    private fun updatePermissionIndicator(overlayGranted: Boolean, accessibilityGranted: Boolean) {
+        when {
+            overlayGranted && accessibilityGranted -> {
+                // Green - all permissions granted
+                binding.statusIndicator.setBackgroundResource(android.R.drawable.presence_online)
+            }
+            overlayGranted || accessibilityGranted -> {
+                // Yellow - some permissions granted
+                binding.statusIndicator.setBackgroundResource(android.R.drawable.presence_away)
+            }
+            else -> {
+                // Red - no permissions granted
+                binding.statusIndicator.setBackgroundResource(android.R.drawable.presence_busy)
+            }
+        }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {

@@ -66,4 +66,12 @@
     <!-- About -->
     <string name="about_description">تزكية هو فلتر محتوى يركز على الخصوصية ويعمل بالكامل على جهازك. لا يتم جمع أو تخزين أو نقل أي بيانات.</string>
     <string name="about_technology">التكنولوجيا: TensorFlow Lite و OpenCV و MediaProjection</string>
+
+    <!-- Refresh Button & Permission Status -->
+    <string name="refresh_permissions">تحديث الأذونات</string>
+    <string name="permissions_checking">جاري التحقق من الأذونات…</string>
+    <string name="permissions_all_granted">جميع الأذونات ممنوحة ✓</string>
+    <string name="permissions_overlay_only">إذن التراكب ممنوح، إذن إمكانية الوصول مفقود</string>
+    <string name="permissions_accessibility_only">إذن إمكانية الوصول ممنوح، إذن التراكب مفقود</string>
+    <string name="permissions_none_granted">لا توجد أذونات ممنوحة</string>
 </resources>

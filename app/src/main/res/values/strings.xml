@@ -66,4 +66,12 @@
     <!-- About -->
     <string name="about_description">Tazkia is a privacy-focused content filter that runs entirely on your device. No data is collected, stored, or transmitted.</string>
     <string name="about_technology">Technology: TensorFlow Lite, OpenCV, MediaProjection</string>
+
+    <!-- Refresh Button & Permission Status -->
+    <string name="refresh_permissions">Refresh Permissions</string>
+    <string name="permissions_checking">Checking permissions…</string>
+    <string name="permissions_all_granted">All permissions granted ✓</string>
+    <string name="permissions_overlay_only">Overlay granted, Accessibility missing</string>
+    <string name="permissions_accessibility_only">Accessibility granted, Overlay missing</string>
+    <string name="permissions_none_granted">No permissions granted</string>
 </resources>
