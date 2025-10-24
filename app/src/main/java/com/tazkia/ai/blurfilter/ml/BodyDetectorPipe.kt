@@ -10,6 +10,7 @@ import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker
 import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker.PoseLandmarkerOptions
 import kotlin.math.max
 import kotlin.math.min
+import android.util.Log
 
 /**
  * Full body detector using MediaPipe Pose Landmarker
@@ -30,10 +31,10 @@ class BodyDetectorMediaPipe(private val context: Context) {
     private var detector: PoseLandmarker? = null
 
     companion object {
-        private const val MODEL_NAME = "pose_landmarker_lite.task" //
-        private const val MIN_DETECTION_CONFIDENCE = 0.5f
-        private const val MIN_TRACKING_CONFIDENCE = 0.5f
-        private const val MIN_PRESENCE_CONFIDENCE = 0.5f
+        private const val MODEL_NAME = "pose_landmarker_lite.task"
+        private const val MIN_DETECTION_CONFIDENCE = 0.3f  // Lower from 0.5f
+        private const val MIN_TRACKING_CONFIDENCE = 0.3f   // Lower from 0.5f
+        private const val MIN_PRESENCE_CONFIDENCE = 0.3f   // Lower from 0.5f
 
         // MediaPipe Pose Landmarks indices
         const val NOSE = 0
@@ -102,22 +103,32 @@ class BodyDetectorMediaPipe(private val context: Context) {
      * @return List of detected bodies with bounding boxes
      */
     fun detectBodies(bitmap: Bitmap): List<BodyDetection> {
-        val mpDetector = detector ?: return emptyList()
+        val mpDetector = detector ?: run {
+            Log.e("BodyDetector", "Detector is null!")
+            return emptyList()
+        }
 
         return try {
+            Log.d("BodyDetector", "Starting detection on ${bitmap.width}x${bitmap.height} image")
+
             // Convert to MediaPipe image format
             val mpImage = BitmapImageBuilder(bitmap).build()
 
-            // DEBUG: Print image size
-            println("DEBUG: Processing image ${bitmap.width}x${bitmap.height}")
             // Run pose detection (~20-30ms for lite, ~50ms for heavy)
+            val startTime = System.currentTimeMillis()
             val result = mpDetector.detect(mpImage)
+            val detectionTime = System.currentTimeMillis() - startTime
+
+            Log.d("BodyDetector", "Detection completed in ${detectionTime}ms, found ${result.landmarks().size} people")
+
             mpImage.close() // Release MediaPipe image
 
             // Convert results to our format
             val detections = mutableListOf<BodyDetection>()
 
             result.landmarks().forEachIndexed { index, landmarkList ->
+                Log.d("BodyDetector", "Processing person $index with ${landmarkList.size} landmarks")
+
                 // Convert MediaPipe landmarks to our format
                 val landmarks = landmarkList.map { landmark ->
                     Landmark(
@@ -138,6 +149,8 @@ class BodyDetectorMediaPipe(private val context: Context) {
                 // Generate unique ID
                 val id = generateId(boundingBox, index)
 
+                Log.d("BodyDetector", "Person $index: bbox=$boundingBox, confidence=$confidence")
+
                 detections.add(
                     BodyDetection(
                         boundingBox = boundingBox,
@@ -148,14 +161,15 @@ class BodyDetectorMediaPipe(private val context: Context) {
                 )
             }
 
+            Log.d("BodyDetector", "Returning ${detections.size} detections")
             detections
 
         } catch (e: Exception) {
+            Log.e("BodyDetector", "Detection failed!", e)
             e.printStackTrace()
             emptyList()
         }
     }
-
     /**
      * Calculate bounding box from body landmarks
      *

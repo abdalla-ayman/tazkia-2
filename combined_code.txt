@@ -1,0 +1,2850 @@
+
+
+=== DIRECTORY: app/src/main/java/com/tazkia/ai/blurfilter/ml ===
+
+
+
+
+--- FILE: app/src/main/java/com/tazkia/ai/blurfilter/ml/GenderClassifier.kt ---
+
+
+package com.tazkia.ai.blurfilter.ml
+
+import android.graphics.Bitmap
+import android.graphics.Rect
+import android.graphics.RectF
+import android.util.LruCache
+import com.tazkia.ai.blurfilter.utils.ImageUtils
+import org.tensorflow.lite.Interpreter
+
+/**
+ * Full body gender classifier using TensorFlow Lite
+ *
+ * WORKS WITH:
+ * - MediaPipe Pose Detection results
+ * - Full body bounding boxes
+ *
+ * CLASSIFICATION SIGNALS:
+ * - Body shape and silhouette
+ * - Clothing patterns and style
+ * - Hair length and style
+ * - Overall appearance
+ * - Posture and stance
+ *
+ * ADVANTAGES over face-only:
+ * - Works even when face is not visible
+ * - More robust to lighting, angles, occlusion
+ * - Higher accuracy (body provides more visual cues)
+ * - Cultural sensitivity (respects head coverings)
+ */
+class GenderClassifier(private val interpreter: Interpreter) {
+
+    companion object {
+        private const val INPUT_SIZE = 224 // Model input size
+        private const val CONFIDENCE_THRESHOLD = 0.6f
+        const val GENDER_FEMALE = 0
+        const val GENDER_MALE = 1
+        const val GENDER_UNKNOWN = -1
+    }
+
+    data class GenderResult(
+        val gender: Int,
+        val confidence: Float,
+        val features: ClassificationFeatures? = null
+    )
+
+    data class ClassificationFeatures(
+        val bodyShapeScore: Float,
+        val clothingScore: Float,
+        val hairScore: Float,
+        val postureScore: Float
+    )
+
+    // Cache classification results
+    private val cache = LruCache<String, GenderResult>(20)
+
+    /**
+     * Classify gender from full body detection
+     *
+     * @param bitmap Original screen capture
+     * @param bodyRect Full body bounding box from MediaPipe
+     * @param bodyId Unique ID for caching
+     * @param orientation Body orientation (frontal, left_profile, right_profile)
+     * @return GenderResult with classification
+     */
+    fun classifyGender(
+        bitmap: Bitmap,
+        bodyRect: RectF,
+        bodyId: String,
+        orientation: String = "frontal"
+    ): GenderResult {
+        // Check cache first
+        cache.get(bodyId)?.let { return it }
+
+        // Crop body region
+        val rect = Rect(
+            bodyRect.left.toInt().coerceAtLeast(0),
+            bodyRect.top.toInt().coerceAtLeast(0),
+            bodyRect.right.toInt().coerceAtMost(bitmap.width),
+            bodyRect.bottom.toInt().coerceAtMost(bitmap.height)
+        )
+
+        // Validate rect size
+        if (rect.width() < 20 || rect.height() < 20) {
+            return GenderResult(GENDER_UNKNOWN, 0f)
+        }
+
+        val bodyBitmap = try {
+            ImageUtils.cropRegion(bitmap, rect)
+        } catch (e: Exception) {
+            return GenderResult(GENDER_UNKNOWN, 0f)
+        }
+
+        // Prepare input for model
+        // Model expects: 224x224 RGB image
+        val inputBuffer = ImageUtils.bitmapToByteBuffer(
+            bodyBitmap,
+            INPUT_SIZE,
+            isQuantized = true
+        )
+
+        // Prepare output
+        // Option 1: Simple output [female_prob, male_prob]
+        val output = Array(1) { FloatArray(2) }
+
+        // Run inference (~100-150ms on CPU, ~30ms on GPU)
+        try {
+            interpreter.run(inputBuffer, output)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            bodyBitmap.recycle()
+            return GenderResult(GENDER_UNKNOWN, 0f)
+        }
+
+        // Parse results
+        val femaleProb = output[0][0]
+        val maleProb = output[0][1]
+
+        val gender = if (femaleProb > maleProb) GENDER_FEMALE else GENDER_MALE
+        val confidence = if (femaleProb > maleProb) femaleProb else maleProb
+
+        // Adjust confidence based on orientation
+        // Frontal views are more reliable than profiles
+        val adjustedConfidence = when (orientation) {
+            "frontal" -> confidence
+            "left_profile", "right_profile" -> confidence * 0.9f
+            else -> confidence * 0.8f
+        }
+
+        val result = if (adjustedConfidence > CONFIDENCE_THRESHOLD) {
+            GenderResult(gender, adjustedConfidence)
+        } else {
+            GenderResult(GENDER_UNKNOWN, adjustedConfidence)
+        }
+
+        // Cache result
+        cache.put(bodyId, result)
+
+        bodyBitmap.recycle()
+        return result
+    }
+
+    /**
+     * Batch classify multiple bodies
+     *
+     * @param bitmap Original image
+     * @param bodies List of body detections
+     * @param orientations Map of body IDs to orientations
+     * @return Map of body IDs to gender results
+     */
+    fun classifyBatch(
+        bitmap: Bitmap,
+        bodies: List<BodyDetectorMediaPipe.BodyDetection>,
+        orientations: Map<String, String> = emptyMap()
+    ): Map<String, GenderResult> {
+        val results = mutableMapOf<String, GenderResult>()
+
+        for (body in bodies) {
+            val orientation = orientations[body.id] ?: "frontal"
+            val result = classifyGender(bitmap, body.boundingBox, body.id, orientation)
+            results[body.id] = result
+        }
+
+        return results
+    }
+
+    /**
+     * Classify with manual feature extraction (alternative approach)
+     * Useful if you don't have a trained full-body model
+     *
+     * THIS IS A FALLBACK METHOD using heuristics:
+     * - Body aspect ratio (height/width)
+     * - Upper body shape
+     * - Clothing color patterns
+     *
+     * NOTE: Less accurate than trained model, but works without custom training
+     */
+    fun classifyWithHeuristics(
+        bitmap: Bitmap,
+        bodyRect: RectF,
+        landmarks: List<BodyDetectorMediaPipe.Landmark>
+    ): GenderResult {
+        // Extract features
+        val aspectRatio = bodyRect.height() / bodyRect.width()
+
+        // Heuristic 1: Body aspect ratio
+        // Typically: female bodies have higher aspect ratio (more elongated)
+        val aspectScore = if (aspectRatio > 2.0f) 0.6f else 0.4f
+
+        // Heuristic 2: Shoulder to hip ratio
+        val shoulderWidth = calculateShoulderWidth(landmarks)
+        val hipWidth = calculateHipWidth(landmarks)
+        val shoulderHipRatio = if (hipWidth > 0) shoulderWidth / hipWidth else 1.0f
+
+        // Typically: male shoulders wider than hips, female more balanced
+        val ratioScore = if (shoulderHipRatio < 1.2f) 0.6f else 0.4f
+
+        // Combine scores
+        val femaleScore = (aspectScore + ratioScore) / 2
+        val maleScore = 1.0f - femaleScore
+
+        val gender = if (femaleScore > maleScore) GENDER_FEMALE else GENDER_MALE
+        val confidence = kotlin.math.max(femaleScore, maleScore)
+
+        return GenderResult(gender, confidence * 0.7f) // Lower confidence for heuristics
+    }
+
+    private fun calculateShoulderWidth(landmarks: List<BodyDetectorMediaPipe.Landmark>): Float {
+        if (landmarks.size < 13) return 0f
+        val leftShoulder = landmarks[11]
+        val rightShoulder = landmarks[12]
+        return kotlin.math.abs(leftShoulder.x - rightShoulder.x)
+    }
+
+    private fun calculateHipWidth(landmarks: List<BodyDetectorMediaPipe.Landmark>): Float {
+        if (landmarks.size < 25) return 0f
+        val leftHip = landmarks[23]
+        val rightHip = landmarks[24]
+        return kotlin.math.abs(leftHip.x - rightHip.x)
+    }
+
+    /**
+     * Clear cache
+     */
+    fun clearCache() {
+        cache.evictAll()
+    }
+
+    /**
+     * Remove specific entry
+     */
+    fun removeCacheEntry(bodyId: String) {
+        cache.remove(bodyId)
+    }
+}
+
+
+
+
+--- FILE: app/src/main/java/com/tazkia/ai/blurfilter/ml/BodyDetectorPipe.kt ---
+
+
+package com.tazkia.ai.blurfilter.ml
+
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.RectF
+import com.google.mediapipe.framework.image.BitmapImageBuilder
+import com.google.mediapipe.tasks.core.BaseOptions
+import com.google.mediapipe.tasks.vision.core.RunningMode
+import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker
+import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker.PoseLandmarkerOptions
+import kotlin.math.max
+import kotlin.math.min
+import android.util.Log
+
+/**
+ * Full body detector using MediaPipe Pose Landmarker
+ *
+ * DETECTS:
+ * - 33 body landmarks (nose to feet)
+ * - Full body bounding box
+ * - Visibility score for each landmark
+ *
+ * ADVANTAGES over face-only detection:
+ * - Detects people even when face is not visible
+ * - Better gender classification (body shape, clothing, posture)
+ * - More robust to occlusion
+ * - Works with side profiles, back views
+ */
+class BodyDetectorMediaPipe(private val context: Context) {
+
+    private var detector: PoseLandmarker? = null
+
+    companion object {
+        private const val MODEL_NAME = "pose_landmarker_lite.task"
+        private const val MIN_DETECTION_CONFIDENCE = 0.3f  // Lower from 0.5f
+        private const val MIN_TRACKING_CONFIDENCE = 0.3f   // Lower from 0.5f
+        private const val MIN_PRESENCE_CONFIDENCE = 0.3f   // Lower from 0.5f
+
+        // MediaPipe Pose Landmarks indices
+        const val NOSE = 0
+        const val LEFT_EYE = 2
+        const val RIGHT_EYE = 5
+        const val LEFT_SHOULDER = 11
+        const val RIGHT_SHOULDER = 12
+        const val LEFT_HIP = 23
+        const val RIGHT_HIP = 24
+        const val LEFT_KNEE = 25
+        const val RIGHT_KNEE = 26
+        const val LEFT_ANKLE = 27
+        const val RIGHT_ANKLE = 28
+    }
+
+    data class BodyDetection(
+        val boundingBox: RectF,
+        val landmarks: List<Landmark>,
+        val confidence: Float,
+        val id: String
+    )
+
+    data class Landmark(
+        val x: Float,
+        val y: Float,
+        val z: Float,
+        val visibility: Float,
+        val presence: Float
+    )
+
+    /**
+     * Initialize MediaPipe pose detector
+     */
+    fun initialize(): Boolean {
+        return try {
+            val baseOptions = BaseOptions.builder()
+                .setModelAssetPath(MODEL_NAME)
+                .build()
+
+            val options = PoseLandmarkerOptions.builder()
+                .setBaseOptions(baseOptions)
+                .setMinPoseDetectionConfidence(MIN_DETECTION_CONFIDENCE)
+                .setMinTrackingConfidence(MIN_TRACKING_CONFIDENCE)
+                .setMinPosePresenceConfidence(MIN_PRESENCE_CONFIDENCE)
+                .setNumPoses(5) // Detect up to 5 people
+                .setRunningMode(RunningMode.IMAGE)
+                .build()
+
+            detector = PoseLandmarker.createFromOptions(context, options)
+            true
+        } catch (e: Exception) {
+            e.printStackTrace()
+            false
+        }
+    }
+
+    /**
+     * Detect full bodies in image
+     *
+     * HOW IT WORKS:
+     * 1. MediaPipe detects 33 landmarks per person
+     * 2. We calculate bounding box from visible landmarks
+     * 3. Return full body regions for gender classification
+     *
+     * @param bitmap Input image
+     * @return List of detected bodies with bounding boxes
+     */
+    fun detectBodies(bitmap: Bitmap): List<BodyDetection> {
+        val mpDetector = detector ?: run {
+            Log.e("BodyDetector", "Detector is null!")
+            return emptyList()
+        }
+
+        return try {
+            Log.d("BodyDetector", "Starting detection on ${bitmap.width}x${bitmap.height} image")
+
+            // Convert to MediaPipe image format
+            val mpImage = BitmapImageBuilder(bitmap).build()
+
+            // Run pose detection (~20-30ms for lite, ~50ms for heavy)
+            val startTime = System.currentTimeMillis()
+            val result = mpDetector.detect(mpImage)
+            val detectionTime = System.currentTimeMillis() - startTime
+
+            Log.d("BodyDetector", "Detection completed in ${detectionTime}ms, found ${result.landmarks().size} people")
+
+            mpImage.close() // Release MediaPipe image
+
+            // Convert results to our format
+            val detections = mutableListOf<BodyDetection>()
+
+            result.landmarks().forEachIndexed { index, landmarkList ->
+                Log.d("BodyDetector", "Processing person $index with ${landmarkList.size} landmarks")
+
+                // Convert MediaPipe landmarks to our format
+                val landmarks = landmarkList.map { landmark ->
+                    Landmark(
+                        x = landmark.x() * bitmap.width,
+                        y = landmark.y() * bitmap.height,
+                        z = landmark.z(),
+                        visibility = if (landmark.visibility().isPresent) landmark.visibility().get() else 1.0f,
+                        presence = if (landmark.presence().isPresent) landmark.presence().get() else 1.0f
+                    )
+                }
+
+                // Calculate bounding box from visible landmarks
+                val boundingBox = calculateBoundingBox(landmarks, bitmap.width, bitmap.height)
+
+                // Get confidence (average of key landmarks visibility)
+                val confidence = calculateConfidence(landmarks)
+
+                // Generate unique ID
+                val id = generateId(boundingBox, index)
+
+                Log.d("BodyDetector", "Person $index: bbox=$boundingBox, confidence=$confidence")
+
+                detections.add(
+                    BodyDetection(
+                        boundingBox = boundingBox,
+                        landmarks = landmarks,
+                        confidence = confidence,
+                        id = id
+                    )
+                )
+            }
+
+            Log.d("BodyDetector", "Returning ${detections.size} detections")
+            detections
+
+        } catch (e: Exception) {
+            Log.e("BodyDetector", "Detection failed!", e)
+            e.printStackTrace()
+            emptyList()
+        }
+    }
+    /**
+     * Calculate bounding box from body landmarks
+     *
+     * Strategy:
+     * 1. Find min/max x,y from all VISIBLE landmarks
+     * 2. Add padding (20% on each side)
+     * 3. Ensure box doesn't go outside image
+     */
+    private fun calculateBoundingBox(
+        landmarks: List<Landmark>,
+        imageWidth: Int,
+        imageHeight: Int
+    ): RectF {
+        // Filter only visible landmarks (visibility > 0.5)
+        val visibleLandmarks = landmarks.filter { it.visibility > 0.5f }
+
+        if (visibleLandmarks.isEmpty()) {
+            // Fallback: use all landmarks
+            return calculateBoundingBoxFromAll(landmarks, imageWidth, imageHeight)
+        }
+
+        // Find bounds
+        val minX = visibleLandmarks.minOf { it.x }
+        val maxX = visibleLandmarks.maxOf { it.x }
+        val minY = visibleLandmarks.minOf { it.y }
+        val maxY = visibleLandmarks.maxOf { it.y }
+
+        val width = maxX - minX
+        val height = maxY - minY
+
+        // Add 20% padding
+        val paddingX = width * 0.2f
+        val paddingY = height * 0.2f
+
+        return RectF(
+            max(0f, minX - paddingX),
+            max(0f, minY - paddingY),
+            min(imageWidth.toFloat(), maxX + paddingX),
+            min(imageHeight.toFloat(), maxY + paddingY)
+        )
+    }
+
+    /**
+     * Fallback: calculate bounding box from all landmarks
+     */
+    private fun calculateBoundingBoxFromAll(
+        landmarks: List<Landmark>,
+        imageWidth: Int,
+        imageHeight: Int
+    ): RectF {
+        val minX = landmarks.minOf { it.x }
+        val maxX = landmarks.maxOf { it.x }
+        val minY = landmarks.minOf { it.y }
+        val maxY = landmarks.maxOf { it.y }
+
+        val width = maxX - minX
+        val height = maxY - minY
+
+        val paddingX = width * 0.2f
+        val paddingY = height * 0.2f
+
+        return RectF(
+            max(0f, minX - paddingX),
+            max(0f, minY - paddingY),
+            min(imageWidth.toFloat(), maxX + paddingX),
+            min(imageHeight.toFloat(), maxY + paddingY)
+        )
+    }
+
+    /**
+     * Calculate detection confidence
+     * Average visibility of key landmarks (shoulders, hips, face)
+     */
+    private fun calculateConfidence(landmarks: List<Landmark>): Float {
+        if (landmarks.size < 33) return 0f
+
+        val keyLandmarks = listOf(
+            landmarks[NOSE],
+            landmarks[LEFT_SHOULDER],
+            landmarks[RIGHT_SHOULDER],
+            landmarks[LEFT_HIP],
+            landmarks[RIGHT_HIP]
+        )
+
+        return if (keyLandmarks.isEmpty()) 0f else keyLandmarks.map { it.visibility }.average().toFloat()    }
+
+    /**
+     * Generate unique ID for body
+     */
+    private fun generateId(rect: RectF, index: Int): String {
+        return "${rect.centerX().toInt()}_${rect.centerY().toInt()}_${rect.width().toInt()}_$index"
+    }
+
+    /**
+     * Get specific landmark by index
+     */
+    fun getLandmark(detection: BodyDetection, index: Int): Landmark? {
+        return if (index < detection.landmarks.size) {
+            detection.landmarks[index]
+        } else null
+    }
+
+    /**
+     * Check if person is facing camera (useful for filtering)
+     */
+    fun isFacingCamera(detection: BodyDetection): Boolean {
+        val nose = getLandmark(detection, NOSE)
+        val leftShoulder = getLandmark(detection, LEFT_SHOULDER)
+        val rightShoulder = getLandmark(detection, RIGHT_SHOULDER)
+
+        if (nose == null || leftShoulder == null || rightShoulder == null) return false
+
+        // Check if nose is between shoulders (frontal view)
+        val shoulderMidX = (leftShoulder.x + rightShoulder.x) / 2
+        val deviation = kotlin.math.abs(nose.x - shoulderMidX)
+        val shoulderWidth = kotlin.math.abs(leftShoulder.x - rightShoulder.x)
+
+        return deviation < shoulderWidth * 0.3f
+    }
+
+    /**
+     * Get body orientation (useful for classification)
+     */
+    fun getBodyOrientation(detection: BodyDetection): String {
+        val leftShoulder = getLandmark(detection, LEFT_SHOULDER)
+        val rightShoulder = getLandmark(detection, RIGHT_SHOULDER)
+        val leftHip = getLandmark(detection, LEFT_HIP)
+        val rightHip = getLandmark(detection, RIGHT_HIP)
+
+        if (leftShoulder == null || rightShoulder == null ||
+            leftHip == null || rightHip == null) {
+            return "unknown"
+        }
+
+        // Calculate if left or right side is more visible
+        val leftVisibility = (leftShoulder.visibility + leftHip.visibility) / 2
+        val rightVisibility = (rightShoulder.visibility + rightHip.visibility) / 2
+
+        return when {
+            leftVisibility > rightVisibility + 0.2f -> "left_profile"
+            rightVisibility > leftVisibility + 0.2f -> "right_profile"
+            else -> "frontal"
+        }
+    }
+
+    /**
+     * Release resources
+     */
+    fun close() {
+        detector?.close()
+        detector = null
+    }
+}
+
+
+
+
+--- FILE: app/src/main/java/com/tazkia/ai/blurfilter/ml/ModelManager.kt ---
+
+
+package com.tazkia.ai.blurfilter.ml
+
+import android.content.Context
+import android.util.Log
+
+class ModelManager(private val context: Context) {
+
+    private var bodyDetector: BodyDetectorMediaPipe? = null
+
+    companion object {
+        private const val TAG = "ModelManager"
+    }
+
+    fun initializeModels(useGpu: Boolean = true): Boolean {
+        return try {
+            Log.d(TAG, "Initializing body detector...")
+            bodyDetector = BodyDetectorMediaPipe(context)
+            val bodySuccess = bodyDetector?.initialize() ?: false
+
+            if (!bodySuccess) {
+                Log.e(TAG, "Failed to initialize body detector")
+                return false
+            }
+
+            Log.d(TAG, "Body detector initialized successfully")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Error initializing models", e)
+            e.printStackTrace()
+            false
+        }
+    }
+
+    fun getBodyDetector(): BodyDetectorMediaPipe? = bodyDetector
+
+    fun release() {
+        bodyDetector?.close()
+        bodyDetector = null
+    }
+
+    fun isInitialized(): Boolean {
+        return bodyDetector != null
+    }
+}
+
+
+
+
+=== DIRECTORY: app/src/main/java/com/tazkia/ai/blurfilter/service ===
+
+
+
+
+--- FILE: app/src/main/java/com/tazkia/ai/blurfilter/service/ScreenCaptureService.kt ---
+
+
+package com.tazkia.ai.blurfilter.service
+
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.PixelFormat
+import android.graphics.Rect
+import android.hardware.display.DisplayManager
+import android.hardware.display.VirtualDisplay
+import android.media.Image
+import android.media.ImageReader
+import android.media.projection.MediaProjection
+import android.media.projection.MediaProjectionManager
+import android.os.Build
+import android.os.Handler
+import android.os.HandlerThread
+import android.os.IBinder
+import android.renderscript.RenderScript
+import android.util.DisplayMetrics
+import android.util.Log
+import android.view.WindowManager
+import androidx.core.app.NotificationCompat
+import androidx.localbroadcastmanager.content.LocalBroadcastManager
+import com.tazkia.ai.blurfilter.R
+import com.tazkia.ai.blurfilter.ml.BodyDetectorMediaPipe
+import com.tazkia.ai.blurfilter.ml.ModelManager
+import com.tazkia.ai.blurfilter.ui.MainActivity
+import com.tazkia.ai.blurfilter.utils.ImageUtils
+import com.tazkia.ai.blurfilter.utils.PreferenceManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+
+class ScreenCaptureService : Service() {
+
+    private lateinit var prefManager: PreferenceManager
+    private lateinit var modelManager: ModelManager
+    private var bodyDetector: BodyDetectorMediaPipe? = null
+    private var overlayService: OverlayService? = null
+    private var renderScript: RenderScript? = null
+
+    private var mediaProjection: MediaProjection? = null
+    private var virtualDisplay: VirtualDisplay? = null
+    private var imageReader: ImageReader? = null
+
+    private val serviceScope = CoroutineScope(Dispatchers.Default + Job())
+    private var processingJob: Job? = null
+    private val processingMutex = Mutex()
+
+    private var captureThread: HandlerThread? = null
+    private var captureHandler: Handler? = null
+
+    private var screenWidth = 0
+    private var screenHeight = 0
+    private var screenDensity = 0
+
+    private var lastFrameHash: Long = 0
+    private var currentFps = 0.5f
+    private var isScrolling = false
+    private var isProcessing = false
+    private var frameCount = 0
+
+    companion object {
+        private const val TAG = "ScreenCaptureService"
+        private const val NOTIFICATION_ID = 1001
+        private const val CHANNEL_ID = "tazkia_protection"
+    }
+
+    private val accessibilityReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                AccessibilityMonitorService.ACTION_SCROLL_EVENT -> {
+                    isScrolling = true
+                    currentFps = 2f
+                }
+                AccessibilityMonitorService.ACTION_WINDOW_CHANGE -> {
+                    // Clear any caches if needed
+                }
+            }
+        }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+
+        try {
+            Log.d(TAG, "========== SERVICE ONCREATE START ==========")
+            prefManager = PreferenceManager(this)
+
+            // Initialize RenderScript with fallback
+            renderScript = try {
+                RenderScript.create(this)
+            } catch (e: Exception) {
+                Log.w(TAG, "RenderScript not available, will use pixelation fallback", e)
+                null
+            }
+
+            // Initialize models
+            Log.d(TAG, "Initializing ModelManager...")
+            modelManager = ModelManager(this)
+            if (!modelManager.initializeModels(prefManager.useGpu)) {
+                Log.e(TAG, "Failed to initialize models")
+                stopSelf()
+                return
+            }
+
+            bodyDetector = modelManager.getBodyDetector()
+            if (bodyDetector == null) {
+                Log.e(TAG, "Body detector is null after initialization")
+                stopSelf()
+                return
+            }
+            Log.d(TAG, "Body detector initialized successfully")
+
+            // Get screen metrics
+            val windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+            val metrics = DisplayMetrics()
+            windowManager.defaultDisplay.getRealMetrics(metrics)
+
+            screenWidth = metrics.widthPixels
+            screenHeight = metrics.heightPixels
+            screenDensity = metrics.densityDpi
+
+            Log.d(TAG, "Screen: ${screenWidth}x${screenHeight}, density: $screenDensity")
+
+            // Start capture thread
+            captureThread = HandlerThread("CaptureThread").apply {
+                start()
+            }
+            captureHandler = Handler(captureThread!!.looper)
+            Log.d(TAG, "Capture thread started")
+
+            // Register accessibility receiver
+            val filter = IntentFilter().apply {
+                addAction(AccessibilityMonitorService.ACTION_SCROLL_EVENT)
+                addAction(AccessibilityMonitorService.ACTION_WINDOW_CHANGE)
+            }
+            LocalBroadcastManager.getInstance(this).registerReceiver(accessibilityReceiver, filter)
+            Log.d(TAG, "Accessibility receiver registered")
+
+            // FIX: Start overlay service properly
+            overlayService = OverlayService()
+            overlayService?.start(this)
+            Log.d(TAG, "Overlay service started")
+
+            Log.d(TAG, "========== SERVICE ONCREATE COMPLETE ==========")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in onCreate", e)
+            e.printStackTrace()
+            stopSelf()
+        }
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Log.d(TAG, "========== ON START COMMAND ==========")
+
+        // Start foreground immediately
+        startForeground(NOTIFICATION_ID, createNotification())
+        Log.d(TAG, "Started foreground service")
+
+        val mediaProjectionData = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent?.getParcelableExtra("mediaProjectionData", Intent::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent?.getParcelableExtra("mediaProjectionData")
+        }
+
+        if (mediaProjectionData == null) {
+            Log.e(TAG, "Media projection data is null")
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
+        startMediaProjection(mediaProjectionData)
+        startProcessing()
+
+        return START_STICKY
+    }
+
+    private fun startMediaProjection(data: Intent) {
+        try {
+            Log.d(TAG, "========== STARTING MEDIA PROJECTION ==========")
+            val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            mediaProjection = projectionManager.getMediaProjection(android.app.Activity.RESULT_OK, data)
+
+            if (mediaProjection == null) {
+                Log.e(TAG, "Failed to create MediaProjection")
+                stopSelf()
+                return
+            }
+
+            // Register callback
+            mediaProjection?.registerCallback(object : MediaProjection.Callback() {
+                override fun onStop() {
+                    Log.d(TAG, "MediaProjection stopped")
+                    stopSelf()
+                }
+            }, captureHandler)
+            Log.d(TAG, "MediaProjection callback registered")
+
+            // FIX: Use higher resolution for better detection
+            // Use at least 480p width for body detection to work reliably
+            val processingWidth = 720 // Increased from 480
+            val processingHeight = (screenHeight * processingWidth / screenWidth)
+
+            Log.d(TAG, "Processing resolution: ${processingWidth}x${processingHeight}")
+            Log.d(TAG, "Screen resolution: ${screenWidth}x${screenHeight}")
+
+            // Close any existing ImageReader
+            imageReader?.close()
+
+            // Create ImageReader
+            imageReader = ImageReader.newInstance(
+                processingWidth,
+                processingHeight,
+                PixelFormat.RGBA_8888,
+                2
+            )
+            Log.d(TAG, "ImageReader created: ${processingWidth}x${processingHeight}")
+
+            // Create VirtualDisplay
+            virtualDisplay = mediaProjection?.createVirtualDisplay(
+                "TazkiaCapture",
+                processingWidth,
+                processingHeight,
+                screenDensity,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                imageReader?.surface,
+                null,
+                captureHandler
+            )
+
+            if (virtualDisplay == null) {
+                Log.e(TAG, "Failed to create VirtualDisplay")
+                stopSelf()
+                return
+            }
+
+            Log.d(TAG, "========== MEDIA PROJECTION STARTED SUCCESSFULLY ==========")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error starting media projection", e)
+            e.printStackTrace()
+            stopSelf()
+        }
+    }
+
+    private fun startProcessing() {
+        Log.d(TAG, "========== STARTING PROCESSING LOOP ==========")
+
+        processingJob = serviceScope.launch {
+            try {
+                // Wait a bit for VirtualDisplay to be ready
+                delay(500)
+
+                while (isActive) {
+                    try {
+                        val frameDelay = (1000 / currentFps).toLong()
+
+                        frameCount++
+                        if (frameCount % 10 == 0) {
+                            Log.d(TAG, "Processing frame #$frameCount (FPS: $currentFps)")
+                        }
+
+                        captureAndProcess()
+
+                        if (isScrolling) {
+                            delay(2000)
+                            isScrolling = false
+                            if (prefManager.adaptiveFps) {
+                                currentFps = 0.5f
+                            }
+                        }
+
+                        delay(frameDelay)
+
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error in processing loop iteration", e)
+                        e.printStackTrace()
+                        delay(1000)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Fatal error in processing loop", e)
+                e.printStackTrace()
+            }
+        }
+    }
+
+    private suspend fun captureAndProcess() {
+        if (isProcessing) {
+            if (frameCount % 20 == 0) {
+                Log.d(TAG, "Already processing, skipping frame")
+            }
+            return
+        }
+
+        processingMutex.withLock {
+            isProcessing = true
+            var image: Image? = null
+            var bitmap: Bitmap? = null
+
+            try {
+                image = imageReader?.acquireLatestImage()
+                if (image == null) {
+                    if (frameCount % 20 == 0) {
+                        Log.w(TAG, "No image available from ImageReader")
+                    }
+                    return
+                }
+
+                if (frameCount % 10 == 0) {
+                    Log.d(TAG, "Captured image: ${image.width}x${image.height}")
+                }
+
+                bitmap = imageToBitmap(image)
+                image.close()
+
+                if (frameCount % 10 == 0) {
+                    Log.d(TAG, "Converted to bitmap: ${bitmap.width}x${bitmap.height}")
+                }
+
+                // Process the frame
+                processFrame(bitmap)
+
+            } catch (e: Exception) {
+                Log.e(TAG, "Error in captureAndProcess", e)
+                e.printStackTrace()
+                bitmap?.recycle()
+            } finally {
+                image?.close()
+                isProcessing = false
+            }
+        }
+    }
+    // BULLETPROOF FIX: Replace these two functions
+
+
+    private fun processFrame(bitmap: Bitmap) {
+        var detectionBitmap: Bitmap? = null
+        try {
+            if (frameCount % 10 == 0) {
+                Log.d(TAG, "========== PROCESS FRAME #$frameCount START ==========")
+            }
+
+            // CHECK 1: Is bitmap valid?
+            if (bitmap.isRecycled) {
+                Log.e(TAG, "ERROR: Bitmap is already recycled before processing!")
+                return
+            }
+
+            val detector = bodyDetector
+            if (detector == null) {
+                Log.e(TAG, "Body detector is NULL!")
+                return
+            }
+
+            // CREATE A FRESH COPY for MediaPipe (it will recycle this one)
+            detectionBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(detectionBitmap)
+            canvas.drawBitmap(bitmap, 0f, 0f, null)
+
+            Log.d(TAG, "Created detection copy: ${detectionBitmap.width}x${detectionBitmap.height}")
+
+            // Give MediaPipe the COPY (not the original)
+            val bodies = detector.detectBodies(detectionBitmap)
+
+            // CHECK 2: Original bitmap should still be fine
+            if (bitmap.isRecycled) {
+                Log.e(TAG, "ERROR: Original bitmap was somehow recycled!")
+                return
+            }
+
+            if (frameCount % 10 == 0) {
+                Log.d(TAG, "Detection returned ${bodies.size} bodies")
+            }
+
+            if (bodies.isEmpty()) {
+                if (frameCount % 10 == 0) {
+                    Log.w(TAG, "No bodies detected, clearing blur")
+                }
+                overlayService?.clearBlur()
+                return
+            }
+
+            Log.d(TAG, "✓✓✓ FOUND ${bodies.size} BODIES! Applying blur...")
+
+            bodies.forEachIndexed { index, body ->
+                Log.d(TAG, "Body $index: bbox=${body.boundingBox}, confidence=${body.confidence}")
+            }
+
+            // CHECK 3: One more check before blur
+            if (bitmap.isRecycled) {
+                Log.e(TAG, "ERROR: Bitmap recycled before blur!")
+                return
+            }
+
+            // Use ORIGINAL bitmap for blurring
+            val blurredBitmap = applyBlurToRegions(bitmap, bodies)
+
+            Log.d(TAG, "Blur applied, updating overlay...")
+            overlayService?.updateBlur(blurredBitmap, bodies.map { it.boundingBox })
+
+            if (frameCount % 10 == 0) {
+                Log.d(TAG, "========== PROCESS FRAME #$frameCount END ==========")
+            }
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in processFrame", e)
+            e.printStackTrace()
+            overlayService?.clearBlur()
+        } finally {
+            // detectionBitmap might already be recycled by MediaPipe, that's OK
+            if (detectionBitmap?.isRecycled == false) {
+                detectionBitmap.recycle()
+            }
+            // Recycle original bitmap
+            if (!bitmap.isRecycled) {
+                bitmap.recycle()
+            }
+        }
+    }
+
+    // 3. Keep applyBlurToRegions the same as before
+    private fun applyBlurToRegions(
+        bitmap: Bitmap,
+        regions: List<BodyDetectorMediaPipe.BodyDetection>
+    ): Bitmap {
+        Log.d(TAG, "========== APPLY BLUR TO REGIONS ==========")
+        Log.d(TAG, "Input bitmap: ${bitmap.width}x${bitmap.height}, isRecycled: ${bitmap.isRecycled}")
+
+        if (bitmap.isRecycled) {
+            Log.e(TAG, "ERROR: Can't blur recycled bitmap!")
+            return Bitmap.createBitmap(720, 1760, Bitmap.Config.ARGB_8888)
+        }
+
+        val result = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(result)
+
+        try {
+            canvas.drawBitmap(bitmap, 0f, 0f, null)
+        } catch (e: Exception) {
+            Log.e(TAG, "ERROR: Failed to draw bitmap!", e)
+            return result
+        }
+
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            isFilterBitmap = true
+        }
+
+        Log.d(TAG, "Processing ${regions.size} regions")
+
+        for ((index, detection) in regions.withIndex()) {
+            try {
+                val rect = Rect(
+                    detection.boundingBox.left.toInt().coerceIn(0, bitmap.width - 1),
+                    detection.boundingBox.top.toInt().coerceIn(0, bitmap.height - 1),
+                    detection.boundingBox.right.toInt().coerceIn(1, bitmap.width),
+                    detection.boundingBox.bottom.toInt().coerceIn(1, bitmap.height)
+                )
+
+                if (rect.width() <= 0 || rect.height() <= 0) continue
+
+                val regionBitmap = ImageUtils.cropRegion(bitmap, rect)
+
+                // Apply STRONG blur (multiple passes)
+                val blurred = if (renderScript != null) {
+                    val blurRadius = 25 // Maximum
+                    var result = regionBitmap
+                    repeat(3) {
+                        val temp = ImageUtils.applyRenderScriptBlur(renderScript!!, result, blurRadius)
+                        if (result != regionBitmap) result.recycle()
+                        result = temp
+                    }
+                    result
+                } else {
+                    val pixelSize = (prefManager.blurIntensity * 2) + 10
+                    ImageUtils.applyPixelation(regionBitmap, pixelSize)
+                }
+
+                canvas.drawBitmap(blurred, rect.left.toFloat(), rect.top.toFloat(), paint)
+
+                // Add dark overlay for opacity
+                val overlayPaint = Paint().apply {
+                    color = android.graphics.Color.argb(80, 0, 0, 0)
+                }
+                canvas.drawRect(
+                    rect.left.toFloat(),
+                    rect.top.toFloat(),
+                    rect.right.toFloat(),
+                    rect.bottom.toFloat(),
+                    overlayPaint
+                )
+
+                regionBitmap.recycle()
+                blurred.recycle()
+
+            } catch (e: Exception) {
+                Log.e(TAG, "Error blurring region $index", e)
+            }
+        }
+
+        Log.d(TAG, "========== BLUR COMPLETE ==========")
+        return result
+    }
+    private fun imageToBitmap(image: Image): Bitmap {
+        val planes = image.planes
+        val buffer = planes[0].buffer
+        val pixelStride = planes[0].pixelStride
+        val rowStride = planes[0].rowStride
+        val rowPadding = rowStride - pixelStride * image.width
+
+        val bitmap = Bitmap.createBitmap(
+            image.width + rowPadding / pixelStride,
+            image.height,
+            Bitmap.Config.ARGB_8888
+        )
+        bitmap.copyPixelsFromBuffer(buffer)
+
+        return if (rowPadding == 0) {
+            bitmap
+        } else {
+            // Create a clean copy without padding
+            val cropped = Bitmap.createBitmap(bitmap, 0, 0, image.width, image.height)
+            bitmap.recycle()
+            cropped
+        }
+    }
+    private fun createNotification(): Notification {
+        createNotificationChannel()
+
+        val intent = Intent(this, MainActivity::class.java)
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            0,
+            intent,
+            PendingIntent.FLAG_IMMUTABLE
+        )
+
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle(getString(R.string.notification_title))
+            .setContentText(getString(R.string.notification_message))
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setContentIntent(pendingIntent)
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build()
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                getString(R.string.notification_channel_name),
+                NotificationManager.IMPORTANCE_LOW
+            )
+            channel.description = getString(R.string.notification_channel_description)
+
+            val notificationManager = getSystemService(NotificationManager::class.java)
+            notificationManager?.createNotificationChannel(channel)
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        Log.d(TAG, "========== SERVICE ON DESTROY ==========")
+
+        try {
+            processingJob?.cancel()
+            serviceScope.cancel()
+
+            virtualDisplay?.release()
+            imageReader?.close()
+            mediaProjection?.stop()
+
+            overlayService?.stop()
+            modelManager.release()
+            renderScript?.destroy()
+
+            LocalBroadcastManager.getInstance(this).unregisterReceiver(accessibilityReceiver)
+
+            captureThread?.quitSafely()
+            captureThread = null
+            captureHandler = null
+
+            prefManager.isProtectionRunning = false
+
+            Log.d(TAG, "Service destroyed successfully")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in onDestroy", e)
+            e.printStackTrace()
+        }
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+}
+
+
+
+
+--- FILE: app/src/main/java/com/tazkia/ai/blurfilter/service/AccessibilityMonitorService.kt ---
+
+
+package com.tazkia.ai.blurfilter.service
+
+import android.accessibilityservice.AccessibilityService
+import android.content.Intent
+import android.view.accessibility.AccessibilityEvent
+import androidx.localbroadcastmanager.content.LocalBroadcastManager
+
+class AccessibilityMonitorService : AccessibilityService() {
+
+    companion object {
+        const val ACTION_SCROLL_EVENT = "com.tazkia.SCROLL_EVENT"
+        const val ACTION_WINDOW_CHANGE = "com.tazkia.WINDOW_CHANGE"
+        const val EXTRA_PACKAGE_NAME = "package_name"
+    }
+
+    private var currentPackage: String? = null
+
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        event ?: return
+        when (event.eventType) {
+            AccessibilityEvent.TYPE_VIEW_SCROLLED -> {
+                LocalBroadcastManager.getInstance(this).sendBroadcast(Intent(ACTION_SCROLL_EVENT))
+            }
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED, AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
+                val packageName = event.packageName?.toString() ?: return
+                if (packageName != currentPackage) {
+                    currentPackage = packageName
+                    val intent = Intent(ACTION_WINDOW_CHANGE).putExtra(EXTRA_PACKAGE_NAME, packageName)
+                    LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
+                }
+            }
+        }
+    }
+    override fun onInterrupt() {
+        // Service interrupted
+    }
+}
+
+
+
+
+--- FILE: app/src/main/java/com/tazkia/ai/blurfilter/service/OverlayService.kt ---
+
+
+package com.tazkia.ai.blurfilter.service
+
+import android.app.Service
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.PixelFormat
+import android.graphics.RectF
+import android.os.Build
+import android.os.IBinder
+import android.util.Log
+import android.view.View
+import android.view.WindowManager
+import android.graphics.Rect
+
+class OverlayService : Service() {
+
+    private var windowManager: WindowManager? = null
+    private var overlayView: OverlayView? = null
+    private var isShowing = false
+
+    companion object {
+        private const val TAG = "OverlayService"
+    }
+
+    fun start(context: Context) {
+        try {
+            Log.d(TAG, "Starting overlay")
+            windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            overlayView = OverlayView(context)
+
+            val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            } else {
+                @Suppress("DEPRECATION")
+                WindowManager.LayoutParams.TYPE_SYSTEM_ALERT
+            }
+
+            val params = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                layoutType,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT
+            )
+
+            windowManager?.addView(overlayView, params)
+            isShowing = true
+            Log.d(TAG, "Overlay started successfully")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error starting overlay", e)
+            e.printStackTrace()
+            isShowing = false
+        }
+    }
+
+    fun updateBlur(blurredBitmap: Bitmap?, regions: List<RectF>) {
+        overlayView?.updateBlur(blurredBitmap, regions)
+    }
+
+    fun clearBlur() {
+        overlayView?.clearBlur()
+    }
+
+    fun stop() {
+        Log.d(TAG, "Stopping overlay")
+        if (isShowing && overlayView != null) {
+            try {
+                windowManager?.removeView(overlayView)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error removing overlay view", e)
+                e.printStackTrace()
+            } finally {
+                isShowing = false
+            }
+        }
+        overlayView?.cleanup()
+        overlayView = null
+        windowManager = null
+    }
+
+    private class OverlayView(context: Context) : View(context) {
+
+        private var blurredBitmap: Bitmap? = null
+        private var blurRegions = listOf<RectF>()
+        private val paint = Paint().apply {
+            isAntiAlias = true
+            isFilterBitmap = true
+        }
+
+        fun updateBlur(bitmap: Bitmap?, regions: List<RectF>) {
+            post {
+                try {
+                    // Recycle old bitmap
+                    blurredBitmap?.recycle()
+                    blurredBitmap = bitmap
+                    blurRegions = regions.toList()
+
+                    Log.d(TAG, "✓ UpdateBlur called with ${regions.size} regions")
+                    regions.forEachIndexed { index, rect ->
+                        Log.d(TAG, "  Region $index: $rect")
+                    }
+
+                    invalidate()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error updating blur", e)
+                    e.printStackTrace()
+                }
+            }
+        }
+
+        fun clearBlur() {
+            post {
+                try {
+                    blurredBitmap?.recycle()
+                    blurredBitmap = null
+                    blurRegions = emptyList()
+                    Log.d(TAG, "Blur cleared")
+                    invalidate()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error clearing blur", e)
+                    e.printStackTrace()
+                }
+            }
+        }
+
+        fun cleanup() {
+            blurredBitmap?.recycle()
+            blurredBitmap = null
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+
+            val bitmap = blurredBitmap ?: return
+            if (bitmap.isRecycled) return
+
+            try {
+                // DON'T draw the full blurred bitmap - only draw the blurred regions!
+                // The blurred bitmap already has the regions blurred, so just draw those parts
+
+                if (blurRegions.isEmpty()) return
+
+                val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    isFilterBitmap = true
+                }
+
+                // Calculate scale factor from bitmap to screen
+                val scaleX = width.toFloat() / bitmap.width
+                val scaleY = height.toFloat() / bitmap.height
+
+                for (region in blurRegions) {
+                    // Scale the region coordinates to screen size
+                    val screenRect = RectF(
+                        region.left * scaleX,
+                        region.top * scaleY,
+                        region.right * scaleX,
+                        region.bottom * scaleY
+                    )
+
+                    // Source rect in bitmap
+                    val srcRect = Rect(
+                        region.left.toInt().coerceIn(0, bitmap.width),
+                        region.top.toInt().coerceIn(0, bitmap.height),
+                        region.right.toInt().coerceIn(0, bitmap.width),
+                        region.bottom.toInt().coerceIn(0, bitmap.height)
+                    )
+
+                    // Draw only this blurred region
+                    canvas.drawBitmap(bitmap, srcRect, screenRect, paint)
+                }
+
+                Log.d(TAG, "onDraw: Drew ${blurRegions.size} blurred regions")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error drawing blur", e)
+                e.printStackTrace()
+            }
+        }
+        override fun onDetachedFromWindow() {
+            super.onDetachedFromWindow()
+            cleanup()
+        }
+    }
+
+    override fun onBind(intent: android.content.Intent?): android.os.IBinder? {
+        return null
+    }
+}
+
+
+
+
+=== DIRECTORY: app/src/main/java/com/tazkia/ai/blurfilter/ui ===
+
+
+
+
+--- FILE: app/src/main/java/com/tazkia/ai/blurfilter/ui/SettingsActivity.kt ---
+
+
+package com.tazkia.ai.blurfilter.ui
+
+import android.os.Bundle
+import android.view.View
+import android.widget.RadioGroup
+import android.widget.TextView
+import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.widget.SwitchCompat
+import com.tazkia.ai.blurfilter.R
+import com.tazkia.ai.blurfilter.utils.PreferenceManager
+
+class SettingsActivity : AppCompatActivity() {
+
+    private lateinit var prefManager: PreferenceManager
+
+    // UI Elements
+    private lateinit var switchGpu: SwitchCompat
+    private lateinit var switchAdaptiveFps: SwitchCompat
+    private lateinit var radioGroupResolution: RadioGroup
+    private lateinit var tvVersion: TextView
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        prefManager = PreferenceManager(this)
+        LanguageHelper.setLanguage(this, prefManager.language)
+
+        setContentView(R.layout.activity_settings)
+
+        supportActionBar?.setDisplayHomeAsUpEnabled(true)
+        supportActionBar?.title = getString(R.string.settings_title)
+
+        initializeViews()
+        loadSettings()
+        setupListeners()
+    }
+
+    private fun initializeViews() {
+        switchGpu = findViewById(R.id.switchGpu)
+        switchAdaptiveFps = findViewById(R.id.switchAdaptiveFps)
+        radioGroupResolution = findViewById(R.id.radioGroupResolution)
+        tvVersion = findViewById(R.id.tvVersion)
+    }
+
+    private fun loadSettings() {
+        // GPU setting
+        switchGpu.isChecked = prefManager.useGpu
+
+        // Adaptive FPS
+        switchAdaptiveFps.isChecked = prefManager.adaptiveFps
+
+        // Resolution
+        when (prefManager.processingResolution) {
+            PreferenceManager.RESOLUTION_LOW -> findViewById<View>(R.id.radioResLow).performClick()
+            PreferenceManager.RESOLUTION_MEDIUM -> findViewById<View>(R.id.radioResMedium).performClick()
+            PreferenceManager.RESOLUTION_HIGH -> findViewById<View>(R.id.radioResHigh).performClick()
+        }
+
+        // Version - using hardcoded version since BuildConfig might not be available yet
+        tvVersion.text = "${getString(R.string.version)} 1.0"
+    }
+
+    private fun setupListeners() {
+        // GPU switch
+        switchGpu.setOnCheckedChangeListener { _, isChecked ->
+            prefManager.useGpu = isChecked
+        }
+
+        // Adaptive FPS switch
+        switchAdaptiveFps.setOnCheckedChangeListener { _, isChecked ->
+            prefManager.adaptiveFps = isChecked
+        }
+
+        // Resolution radio group
+        radioGroupResolution.setOnCheckedChangeListener { _, checkedId ->
+            prefManager.processingResolution = when (checkedId) {
+                R.id.radioResLow -> PreferenceManager.RESOLUTION_LOW
+                R.id.radioResHigh -> PreferenceManager.RESOLUTION_HIGH
+                else -> PreferenceManager.RESOLUTION_MEDIUM
+            }
+        }
+    }
+
+    override fun onSupportNavigateUp(): Boolean {
+        finish()
+        return true
+    }
+}
+
+
+
+
+--- FILE: app/src/main/java/com/tazkia/ai/blurfilter/ui/MainActivity.kt ---
+
+
+package com.tazkia.ai.blurfilter.ui
+
+import android.app.Activity
+import android.content.Intent
+import android.os.Bundle
+import android.util.Log
+import android.view.View
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
+import android.widget.SeekBar
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AppCompatActivity
+import com.tazkia.ai.blurfilter.R
+import com.tazkia.ai.blurfilter.databinding.ActivityMainBinding
+import com.tazkia.ai.blurfilter.service.ScreenCaptureService
+import com.tazkia.ai.blurfilter.utils.PermissionHelper
+import com.tazkia.ai.blurfilter.utils.PreferenceManager
+
+class MainActivity : AppCompatActivity() {
+
+    private lateinit var binding: ActivityMainBinding
+    private lateinit var prefManager: PreferenceManager
+    private var isRunning = false
+
+    private val mediaProjectionLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            result.data?.let { data ->
+                startProtection(data)
+            }
+        } else {
+            Log.w("MainActivity", "Media projection permission denied")
+            updateUIState()
+        }
+    }
+
+    private val overlayPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (PermissionHelper.hasOverlayPermission(this)) {
+            Log.i("MainActivity", "Overlay permission granted")
+            checkPermissionsAndStart()
+        } else {
+            Log.w("MainActivity", "Overlay permission denied")
+            binding.tvPermissionStatus.text = getString(R.string.permissions_none_granted)
+            updatePermissionIndicator(false, PermissionHelper.isAccessibilityServiceEnabled(this))
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        // Initialize preferences
+        prefManager = PreferenceManager(this)
+
+        // Apply saved language
+        LanguageHelper.setLanguage(this, prefManager.language)
+
+        binding = ActivityMainBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+
+        setupUI()
+        setupListeners()
+        loadPreferences()
+        updateUIState()
+        checkPermissionsStatus() // Check permissions on startup
+    }
+
+    override fun onResume() {
+        super.onResume()
+        updateUIState()
+        checkPermissionsStatus() // Check permissions when returning to app
+    }
+
+    private fun setupUI() {
+        // Setup mode spinner
+        val modeAdapter = ArrayAdapter.createFromResource(
+            this,
+            R.array.detection_modes,
+            android.R.layout.simple_spinner_item
+        )
+        modeAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        binding.spinnerMode.adapter = modeAdapter
+
+        // Setup settings button
+        binding.btnSettings.setOnClickListener {
+            startActivity(Intent(this, SettingsActivity::class.java))
+        }
+    }
+
+    private fun setupListeners() {
+        // Mode selection
+        binding.spinnerMode.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                prefManager.detectionMode = position
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+
+        // Filter target
+        binding.radioGroupFilter.setOnCheckedChangeListener { _, checkedId ->
+            when (checkedId) {
+                R.id.radioFilterWomen -> prefManager.filterTarget = PreferenceManager.FILTER_WOMEN
+                R.id.radioFilterMen -> prefManager.filterTarget = PreferenceManager.FILTER_MEN
+            }
+        }
+
+        // Blur intensity
+        binding.seekBarBlur.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                binding.tvBlurValue.text = progress.toString()
+                prefManager.blurIntensity = progress
+            }
+
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+
+        // Toggle protection button
+        binding.btnToggleProtection.setOnClickListener {
+            if (isRunning) {
+                stopProtection()
+            } else {
+                checkPermissionsAndStart()
+            }
+        }
+
+        // Language switch
+        binding.btnLanguage.setOnClickListener {
+            val newLang = if (prefManager.language == PreferenceManager.LANG_ENGLISH) {
+                PreferenceManager.LANG_ARABIC
+            } else {
+                PreferenceManager.LANG_ENGLISH
+            }
+            prefManager.language = newLang
+            LanguageHelper.applyLanguage(this, newLang)
+        }
+
+        // Refresh permissions button
+        binding.btnRefresh.setOnClickListener {
+            checkPermissionsStatus()
+        }
+    }
+
+    private fun loadPreferences() {
+        binding.spinnerMode.setSelection(prefManager.detectionMode)
+
+        when (prefManager.filterTarget) {
+            PreferenceManager.FILTER_WOMEN -> binding.radioFilterWomen.isChecked = true
+            PreferenceManager.FILTER_MEN -> binding.radioFilterMen.isChecked = true
+        }
+
+        binding.seekBarBlur.progress = prefManager.blurIntensity
+        binding.tvBlurValue.text = prefManager.blurIntensity.toString()
+
+        isRunning = prefManager.isProtectionRunning
+    }
+
+    private fun updateUIState() {
+        if (isRunning) {
+            binding.tvStatus.text = getString(R.string.status_running)
+            binding.statusIndicator.setBackgroundResource(android.R.drawable.presence_online)
+            binding.btnToggleProtection.text = getString(R.string.stop_protection)
+
+            // Disable controls while running
+            binding.spinnerMode.isEnabled = false
+            binding.radioGroupFilter.isEnabled = false
+            binding.seekBarBlur.isEnabled = false
+            binding.btnRefresh.isEnabled = false
+        } else {
+            binding.tvStatus.text = getString(R.string.status_idle)
+            binding.statusIndicator.setBackgroundResource(android.R.drawable.presence_offline)
+            binding.btnToggleProtection.text = getString(R.string.start_protection)
+
+            // Enable controls
+            binding.spinnerMode.isEnabled = true
+            binding.radioGroupFilter.isEnabled = true
+            binding.seekBarBlur.isEnabled = true
+            binding.btnRefresh.isEnabled = true
+        }
+    }
+
+    private fun checkPermissionsAndStart() {
+        Log.d("MainActivity", "Checking permissions...")
+        if (!PermissionHelper.hasOverlayPermission(this)) {
+            Log.i("MainActivity", "Requesting overlay permission")
+            PermissionHelper.requestOverlayPermission(this, overlayPermissionLauncher)
+            return
+        }
+        if (prefManager.detectionMode == PreferenceManager.MODE_HYBRID &&
+            !PermissionHelper.isAccessibilityServiceEnabled(this)) {
+            Log.i("MainActivity", "Requesting accessibility permission")
+            PermissionHelper.requestAccessibilityPermission(this)
+            return
+        }
+        Log.i("MainActivity", "Requesting media projection")
+        PermissionHelper.requestMediaProjection(this, mediaProjectionLauncher)
+    }
+
+    private fun startProtection(mediaProjectionData: Intent) {
+        val serviceIntent = Intent(this, ScreenCaptureService::class.java)
+        serviceIntent.putExtra("mediaProjectionData", mediaProjectionData)
+
+        startForegroundService(serviceIntent)
+
+        isRunning = true
+        prefManager.isProtectionRunning = true
+        updateUIState()
+    }
+
+    private fun stopProtection() {
+        val serviceIntent = Intent(this, ScreenCaptureService::class.java)
+        stopService(serviceIntent)
+
+        isRunning = false
+        prefManager.isProtectionRunning = false
+        updateUIState()
+    }
+
+    private fun checkPermissionsStatus() {
+        val overlayGranted = PermissionHelper.hasOverlayPermission(this)
+        val accessibilityGranted = PermissionHelper.isAccessibilityServiceEnabled(this)
+
+        // Update permission status text
+        val statusText = when {
+            overlayGranted && accessibilityGranted -> getString(R.string.permissions_all_granted)
+            overlayGranted -> getString(R.string.permissions_overlay_only)
+            accessibilityGranted -> getString(R.string.permissions_accessibility_only)
+            else -> getString(R.string.permissions_none_granted)
+        }
+
+        binding.tvPermissionStatus.text = statusText
+
+        // Update status indicator color based on permissions
+        updatePermissionIndicator(overlayGranted, accessibilityGranted)
+    }
+
+    private fun updatePermissionIndicator(overlayGranted: Boolean, accessibilityGranted: Boolean) {
+        when {
+            overlayGranted && accessibilityGranted -> {
+                binding.statusIndicator.setBackgroundResource(android.R.drawable.presence_online)
+            }
+            overlayGranted || accessibilityGranted -> {
+                binding.statusIndicator.setBackgroundResource(android.R.drawable.presence_away)
+            }
+            else -> {
+                binding.statusIndicator.setBackgroundResource(android.R.drawable.presence_busy)
+            }
+        }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        when (requestCode) {
+            PermissionHelper.REQUEST_OVERLAY_PERMISSION -> {
+                if (PermissionHelper.hasOverlayPermission(this)) {
+                    Log.i("MainActivity", "Overlay permission granted via onActivityResult")
+                    checkPermissionsAndStart()
+                } else {
+                    Log.w("MainActivity", "Overlay permission denied via onActivityResult")
+                    binding.tvPermissionStatus.text = getString(R.string.permissions_none_granted)
+                    updatePermissionIndicator(false, PermissionHelper.isAccessibilityServiceEnabled(this))
+                }
+            }
+        }
+    }
+}
+
+
+
+
+--- FILE: app/src/main/java/com/tazkia/ai/blurfilter/ui/LanguageHelper.kt ---
+
+
+package com.tazkia.ai.blurfilter.ui
+
+import android.app.Activity
+import android.content.Context
+import android.content.res.Configuration
+import android.os.Build
+import java.util.Locale
+
+object LanguageHelper {
+
+    /**
+     * Set app language
+     */
+    fun setLanguage(context: Context, languageCode: String) {
+        val locale = Locale(languageCode)
+        Locale.setDefault(locale)
+
+        val resources = context.resources
+        val configuration = Configuration(resources.configuration)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            configuration.setLocale(locale)
+            context.createConfigurationContext(configuration)
+        } else {
+            @Suppress("DEPRECATION")
+            configuration.locale = locale
+        }
+
+        @Suppress("DEPRECATION")
+        resources.updateConfiguration(configuration, resources.displayMetrics)
+
+        // Set layout direction for RTL support
+        if (languageCode == "ar") {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1) {
+                configuration.setLayoutDirection(locale)
+            }
+        }
+    }
+
+    /**
+     * Apply language and recreate activity
+     */
+    fun applyLanguage(activity: Activity, languageCode: String) {
+        setLanguage(activity, languageCode)
+        activity.recreate()
+    }
+
+    /**
+     * Get current language
+     */
+    fun getCurrentLanguage(context: Context): String {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            context.resources.configuration.locales[0].language
+        } else {
+            @Suppress("DEPRECATION")
+            context.resources.configuration.locale.language
+        }
+    }
+
+    /**
+     * Check if current language is RTL
+     */
+    fun isRTL(context: Context): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1) {
+            context.resources.configuration.layoutDirection == Configuration.SCREENLAYOUT_LAYOUTDIR_RTL
+        } else {
+            false
+        }
+    }
+}
+
+
+
+
+=== DIRECTORY: app/src/main/java/com/tazkia/ai/blurfilter/utils ===
+
+
+
+
+--- FILE: app/src/main/java/com/tazkia/ai/blurfilter/utils/PreferenceManager.kt ---
+
+
+package com.tazkia.ai.blurfilter.utils
+
+import android.content.Context
+import android.content.SharedPreferences
+
+class PreferenceManager(context: Context) {
+
+    private val prefs: SharedPreferences = context.getSharedPreferences(
+        PREFS_NAME,
+        Context.MODE_PRIVATE
+    )
+
+    companion object {
+        private const val PREFS_NAME = "tazkia_prefs"
+
+        // Keys
+        private const val KEY_MODE = "mode"
+        private const val KEY_FILTER_TARGET = "filter_target"
+        private const val KEY_BLUR_INTENSITY = "blur_intensity"
+        private const val KEY_LANGUAGE = "language"
+        private const val KEY_USE_GPU = "use_gpu"
+        private const val KEY_ADAPTIVE_FPS = "adaptive_fps"
+        private const val KEY_RESOLUTION = "resolution"
+        private const val KEY_IS_RUNNING = "is_running"
+
+        // Default values
+        const val MODE_HYBRID = 0
+        const val MODE_MEDIA_PROJECTION_ONLY = 1
+
+        const val FILTER_WOMEN = 0
+        const val FILTER_MEN = 1
+
+        const val RESOLUTION_LOW = 240
+        const val RESOLUTION_MEDIUM = 320
+        const val RESOLUTION_HIGH = 480
+
+        const val LANG_ENGLISH = "en"
+        const val LANG_ARABIC = "ar"
+    }
+
+    // Mode
+    var detectionMode: Int
+        get() = prefs.getInt(KEY_MODE, MODE_HYBRID)
+        set(value) = prefs.edit().putInt(KEY_MODE, value.coerceIn(MODE_HYBRID, MODE_MEDIA_PROJECTION_ONLY)).apply()
+    // Filter target
+    var filterTarget: Int
+        get() = prefs.getInt(KEY_FILTER_TARGET, FILTER_WOMEN)
+        set(value) = prefs.edit().putInt(KEY_FILTER_TARGET, value.coerceIn(FILTER_WOMEN, FILTER_MEN)).apply()
+    // Blur intensity (1-10)
+    var blurIntensity: Int
+        get() = prefs.getInt(KEY_BLUR_INTENSITY, 5)
+        set(value) = prefs.edit().putInt(KEY_BLUR_INTENSITY, value.coerceIn(1, 10)).apply()
+
+    // Language
+    var language: String
+        get() = prefs.getString(KEY_LANGUAGE, LANG_ENGLISH) ?: LANG_ENGLISH
+        set(value) = prefs.edit().putString(KEY_LANGUAGE, value).apply()
+
+    // GPU acceleration
+    var useGpu: Boolean
+        get() = prefs.getBoolean(KEY_USE_GPU, true)
+        set(value) = prefs.edit().putBoolean(KEY_USE_GPU, value).apply()
+
+    // Adaptive FPS
+    var adaptiveFps: Boolean
+        get() = prefs.getBoolean(KEY_ADAPTIVE_FPS, true)
+        set(value) = prefs.edit().putBoolean(KEY_ADAPTIVE_FPS, value).apply()
+
+    // Resolution
+    var processingResolution: Int
+        get() = prefs.getInt(KEY_RESOLUTION, RESOLUTION_MEDIUM)
+        set(value) = prefs.edit().putInt(KEY_RESOLUTION, value).apply()
+
+    // Running state
+    var isProtectionRunning: Boolean
+        get() = prefs.getBoolean(KEY_IS_RUNNING, false)
+        set(value) = prefs.edit().putBoolean(KEY_IS_RUNNING, value).apply()
+
+    fun clear() {
+        prefs.edit().clear().apply()
+    }
+}
+
+
+
+
+--- FILE: app/src/main/java/com/tazkia/ai/blurfilter/utils/ImageUtils.kt ---
+
+
+package com.tazkia.ai.blurfilter.utils
+
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Rect
+import android.renderscript.Allocation
+import android.renderscript.Element
+import android.renderscript.RenderScript
+import android.renderscript.ScriptIntrinsicBlur
+import java.nio.ByteBuffer
+import kotlin.math.sqrt
+
+object ImageUtils {
+
+    /**
+     * Resize bitmap to target width while maintaining aspect ratio
+     */
+    fun resizeBitmap(bitmap: Bitmap, targetWidth: Int): Bitmap {
+        val aspectRatio = bitmap.height.toFloat() / bitmap.width.toFloat()
+        val targetHeight = (targetWidth * aspectRatio).toInt()
+
+        return Bitmap.createScaledBitmap(
+            bitmap,
+            targetWidth,
+            targetHeight,
+            true
+        )
+    }
+
+    /**
+     * Apply RenderScript blur (GPU-accelerated, fastest option)
+     */
+    fun applyRenderScriptBlur(rs: RenderScript, bitmap: Bitmap, radius: Int): Bitmap {
+        val input = Allocation.createFromBitmap(rs, bitmap)
+        val output = Allocation.createTyped(rs, input.type)
+        val script = ScriptIntrinsicBlur.create(rs, Element.U8_4(rs))
+        try {
+            script.setRadius(radius.coerceIn(1, 25).toFloat())
+            script.setInput(input)
+            script.forEach(output)
+            val result = Bitmap.createBitmap(bitmap.width, bitmap.height, bitmap.config)
+            output.copyTo(result)
+            return result
+        } finally {
+            input.destroy()
+            output.destroy()
+            script.destroy()
+        }
+    }
+    /**
+     * Apply pixelation effect (Alternative to blur)
+     */
+    fun applyPixelation(bitmap: Bitmap, pixelSize: Int): Bitmap {
+        val width = bitmap.width
+        val height = bitmap.height
+        val result = Bitmap.createBitmap(width, height, bitmap.config)
+        val canvas = Canvas(result)
+        val paint = Paint()
+
+        val smallWidth = width / pixelSize
+        val smallHeight = height / pixelSize
+
+        val small = Bitmap.createScaledBitmap(bitmap, smallWidth, smallHeight, false)
+        canvas.drawBitmap(
+            small,
+            null,
+            Rect(0, 0, width, height),
+            paint
+        )
+
+        small.recycle()
+        return result
+    }
+
+    /**
+     * Calculate perceptual hash for motion detection
+     */
+    fun calculateHash(bitmap: Bitmap): Long {
+        val small = Bitmap.createScaledBitmap(bitmap, 8, 8, true)
+        val pixels = IntArray(64)
+        small.getPixels(pixels, 0, 8, 0, 0, 8, 8)
+
+        val grayscale = pixels.map { pixel ->
+            val r = (pixel shr 16) and 0xFF
+            val g = (pixel shr 8) and 0xFF
+            val b = pixel and 0xFF
+            (0.299 * r + 0.587 * g + 0.114 * b).toInt()
+        }
+
+        val avg = grayscale.average()
+        var hash = 0L
+
+        grayscale.forEachIndexed { index, value ->
+            if (value > avg) {
+                hash = hash or (1L shl index)
+            }
+        }
+
+        small.recycle()
+        return hash
+    }
+
+    /**
+     * Calculate Hamming distance between two hashes
+     */
+    fun hammingDistance(hash1: Long, hash2: Long): Int {
+        var xor = hash1 xor hash2
+        var count = 0
+
+        while (xor != 0L) {
+            count += (xor and 1L).toInt()
+            xor = xor shr 1
+        }
+
+        return count
+    }
+
+    /**
+     * Check if there's significant motion between frames
+     */
+    fun hasSignificantMotion(
+        hash1: Long,
+        hash2: Long,
+        threshold: Int = 5
+    ): Boolean {
+        return hammingDistance(hash1, hash2) > threshold
+    }
+
+    /**
+     * Convert bitmap to ByteBuffer for TFLite
+     */
+    fun bitmapToByteBuffer(
+        bitmap: Bitmap,
+        inputSize: Int,
+        isQuantized: Boolean = true
+    ): ByteBuffer {
+        val buffer = if (isQuantized) {
+            ByteBuffer.allocateDirect(inputSize * inputSize * 3)
+        } else {
+            ByteBuffer.allocateDirect(4 * inputSize * inputSize * 3)
+        }
+
+        val scaled = Bitmap.createScaledBitmap(bitmap, inputSize, inputSize, true)
+        val pixels = IntArray(inputSize * inputSize)
+        scaled.getPixels(pixels, 0, inputSize, 0, 0, inputSize, inputSize)
+
+        for (pixel in pixels) {
+            val r = ((pixel shr 16) and 0xFF)
+            val g = ((pixel shr 8) and 0xFF)
+            val b = (pixel and 0xFF)
+
+            if (isQuantized) {
+                buffer.put(r.toByte())
+                buffer.put(g.toByte())
+                buffer.put(b.toByte())
+            } else {
+                buffer.putFloat((r - 127.5f) / 127.5f)
+                buffer.putFloat((g - 127.5f) / 127.5f)
+                buffer.putFloat((b - 127.5f) / 127.5f)
+            }
+        }
+
+        scaled.recycle()
+        buffer.rewind()
+        return buffer
+    }
+
+    /**
+     * Crop region from bitmap
+     */
+    fun cropRegion(bitmap: Bitmap, rect: Rect): Bitmap {
+        val x = rect.left.coerceAtLeast(0)
+        val y = rect.top.coerceAtLeast(0)
+        val width = rect.width().coerceAtMost(bitmap.width - x)
+        val height = rect.height().coerceAtMost(bitmap.height - y)
+
+        return Bitmap.createBitmap(bitmap, x, y, width, height)
+    }
+
+    /**
+     * Calculate Euclidean distance between two points
+     */
+    fun distance(x1: Int, y1: Int, x2: Int, y2: Int): Float {
+        val dx = (x2 - x1).toFloat()
+        val dy = (y2 - y1).toFloat()
+        return sqrt(dx * dx + dy * dy)
+    }
+}
+
+
+
+
+--- FILE: app/src/main/java/com/tazkia/ai/blurfilter/utils/PermissionHelper.kt ---
+
+
+package com.tazkia.ai.blurfilter.utils
+
+import android.app.Activity
+import android.content.Context
+import android.content.Intent
+import android.media.projection.MediaProjectionManager
+import android.net.Uri
+import android.provider.Settings
+import androidx.activity.result.ActivityResultLauncher
+import androidx.appcompat.app.AlertDialog
+import com.tazkia.ai.blurfilter.R
+
+object PermissionHelper {
+
+    const val REQUEST_MEDIA_PROJECTION = 1001
+    const val REQUEST_OVERLAY_PERMISSION = 1002
+
+    /**
+     * Check if overlay permission is granted
+     */
+    fun hasOverlayPermission(context: Context): Boolean {
+        return Settings.canDrawOverlays(context)
+    }
+
+    /**
+     * Check if accessibility service is enabled
+     */
+    fun isAccessibilityServiceEnabled(context: Context): Boolean {
+        val serviceName = "${context.packageName}/.service.AccessibilityMonitorService"
+        val enabledServices = Settings.Secure.getString(
+            context.contentResolver,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        )
+        return enabledServices?.contains(serviceName) == true
+    }
+
+    /**
+     * Request overlay permission
+     */
+    fun requestOverlayPermission(activity: Activity, launcher: ActivityResultLauncher<Intent>) {
+        AlertDialog.Builder(activity)
+            .setTitle(R.string.permission_overlay_title)
+            .setMessage(R.string.permission_overlay_message)
+            .setPositiveButton(R.string.grant_permission) { _, _ ->
+                val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${activity.packageName}"))
+                launcher.launch(intent)
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+    /**
+     * Request accessibility permission
+     */
+    fun requestAccessibilityPermission(activity: Activity) {
+        AlertDialog.Builder(activity)
+            .setTitle(R.string.permission_accessibility_title)
+            .setMessage(R.string.permission_accessibility_message)
+            .setPositiveButton(R.string.grant_permission) { _, _ ->
+                val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                activity.startActivity(intent)
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /**
+     * Request media projection permission
+     */
+    fun requestMediaProjection(
+        activity: Activity,
+        launcher: ActivityResultLauncher<Intent>
+    ) {
+        AlertDialog.Builder(activity)
+            .setTitle(R.string.permission_media_projection_title)
+            .setMessage(R.string.permission_media_projection_message)
+            .setPositiveButton(R.string.grant_permission) { _, _ ->
+                val mediaProjectionManager = activity.getSystemService(Context.MEDIA_PROJECTION_SERVICE)
+                        as MediaProjectionManager
+                launcher.launch(mediaProjectionManager.createScreenCaptureIntent())
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /**
+     * Check all required permissions
+     */
+    fun hasAllPermissions(context: Context): Boolean {
+        return hasOverlayPermission(context) && isAccessibilityServiceEnabled(context)
+    }
+}
+
+
+
+
+=== DIRECTORY: app/src/main/res/layout ===
+
+
+
+
+--- FILE: app/src/main/res/layout/activity_settings.xml ---
+
+
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <!-- Performance Section -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/performance_settings"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:textColor="?attr/colorPrimary"
+            android:layout_marginTop="16dp" />
+
+        <!-- GPU Acceleration -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginTop="16dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/use_gpu"
+                android:textSize="16sp" />
+
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/switchGpu"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:checked="true" />
+        </LinearLayout>
+
+        <!-- Adaptive FPS -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginTop="16dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/adaptive_fps"
+                android:textSize="16sp" />
+
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/switchAdaptiveFps"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:checked="true" />
+        </LinearLayout>
+
+        <!-- Resolution Quality -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/resolution_quality"
+            android:textSize="16sp"
+            android:layout_marginTop="24dp" />
+
+        <RadioGroup
+            android:id="@+id/radioGroupResolution"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp">
+
+            <RadioButton
+                android:id="@+id/radioResLow"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/resolution_low" />
+
+            <RadioButton
+                android:id="@+id/radioResMedium"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/resolution_medium"
+                android:checked="true" />
+
+            <RadioButton
+                android:id="@+id/radioResHigh"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/resolution_high" />
+        </RadioGroup>
+
+        <!-- About Section -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/about"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:textColor="?attr/colorPrimary"
+            android:layout_marginTop="32dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/about_description"
+            android:textSize="14sp"
+            android:layout_marginTop="8dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/about_technology"
+            android:textSize="12sp"
+            android:textColor="?android:attr/textColorSecondary"
+            android:layout_marginTop="8dp" />
+
+        <TextView
+            android:id="@+id/tvVersion"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/version"
+            android:textSize="12sp"
+            android:textColor="?android:attr/textColorSecondary"
+            android:layout_marginTop="16dp" />
+
+    </LinearLayout>
+
+</ScrollView>
+
+
+
+
+--- FILE: app/src/main/res/layout/activity_main.xml ---
+
+
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true"
+    tools:context=".ui.MainActivity">
+
+    <androidx.constraintlayout.widget.ConstraintLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:padding="24dp">
+
+        <!-- Header -->
+        <TextView
+            android:id="@+id/tvTitle"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:text="@string/welcome_title"
+            android:textSize="28sp"
+            android:textStyle="bold"
+            android:textColor="?attr/colorPrimary"
+            app:layout_constraintTop_toTopOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintEnd_toStartOf="@id/btnRefresh" />
+
+        <ImageButton
+            android:id="@+id/btnRefresh"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:src="@android:drawable/ic_menu_rotate"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/refresh_permissions"
+            app:layout_constraintTop_toTopOf="parent"
+            app:layout_constraintEnd_toStartOf="@id/btnSettings"
+            android:layout_marginEnd="8dp" />
+
+        <ImageButton
+            android:id="@+id/btnSettings"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:src="@android:drawable/ic_menu_preferences"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/settings"
+            app:layout_constraintTop_toTopOf="parent"
+            app:layout_constraintEnd_toEndOf="parent" />
+
+        <TextView
+            android:id="@+id/tvSubtitle"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:text="@string/welcome_subtitle"
+            android:textSize="16sp"
+            android:textColor="?android:attr/textColorSecondary"
+            android:layout_marginTop="4dp"
+            app:layout_constraintTop_toBottomOf="@id/tvTitle"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintEnd_toEndOf="parent" />
+
+        <!-- Status Card -->
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/cardStatus"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="32dp"
+            app:cardCornerRadius="16dp"
+            app:cardElevation="4dp"
+            app:layout_constraintTop_toBottomOf="@id/tvSubtitle"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintEnd_toEndOf="parent">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="20dp">
+
+                <TextView
+                    android:id="@+id/tvStatus"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/status_idle"
+                    android:textSize="18sp"
+                    android:textStyle="bold"
+                    android:textColor="?attr/colorPrimary" />
+
+                <View
+                    android:id="@+id/statusIndicator"
+                    android:layout_width="12dp"
+                    android:layout_height="12dp"
+                    android:layout_marginTop="8dp"
+                    android:background="@android:drawable/presence_offline" />
+
+                <TextView
+                    android:id="@+id/tvPermissionStatus"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/permissions_checking"
+                    android:textSize="14sp"
+                    android:layout_marginTop="8dp"
+                    android:textColor="?android:attr/textColorSecondary" />
+
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <!-- Mode Selection -->
+        <TextView
+            android:id="@+id/tvModeLabel"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/mode_label"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:layout_marginTop="24dp"
+            app:layout_constraintTop_toBottomOf="@id/cardStatus"
+            app:layout_constraintStart_toStartOf="parent" />
+
+        <androidx.appcompat.widget.AppCompatSpinner
+            android:id="@+id/spinnerMode"
+            android:layout_width="0dp"
+            android:layout_height="48dp"
+            android:layout_marginTop="8dp"
+            android:minHeight="48dp"
+            app:layout_constraintTop_toBottomOf="@id/tvModeLabel"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintEnd_toEndOf="parent" />
+
+        <!-- Filter Target -->
+        <TextView
+            android:id="@+id/tvFilterLabel"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/filter_target_label"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:layout_marginTop="24dp"
+            app:layout_constraintTop_toBottomOf="@id/spinnerMode"
+            app:layout_constraintStart_toStartOf="parent" />
+
+        <RadioGroup
+            android:id="@+id/radioGroupFilter"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginTop="8dp"
+            app:layout_constraintTop_toBottomOf="@id/tvFilterLabel"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintEnd_toEndOf="parent">
+
+            <RadioButton
+                android:id="@+id/radioFilterWomen"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/filter_women"
+                android:checked="true" />
+
+            <RadioButton
+                android:id="@+id/radioFilterMen"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/filter_men" />
+
+        </RadioGroup>
+
+        <!-- Blur Intensity -->
+        <TextView
+            android:id="@+id/tvBlurLabel"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/blur_intensity_label"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:layout_marginTop="24dp"
+            app:layout_constraintTop_toBottomOf="@id/radioGroupFilter"
+            app:layout_constraintStart_toStartOf="parent" />
+
+        <TextView
+            android:id="@+id/tvBlurValue"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="5"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:layout_marginTop="24dp"
+            app:layout_constraintTop_toBottomOf="@id/radioGroupFilter"
+            app:layout_constraintEnd_toEndOf="parent" />
+
+        <androidx.appcompat.widget.AppCompatSeekBar
+            android:id="@+id/seekBarBlur"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:max="10"
+            android:progress="5"
+            android:layout_marginTop="8dp"
+            app:layout_constraintTop_toBottomOf="@id/tvBlurLabel"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintEnd_toEndOf="parent" />
+
+        <!-- Control Buttons -->
+        <Button
+            android:id="@+id/btnToggleProtection"
+            android:layout_width="0dp"
+            android:layout_height="64dp"
+            android:text="@string/start_protection"
+            android:textSize="18sp"
+            android:layout_marginTop="32dp"
+            app:layout_constraintTop_toBottomOf="@id/seekBarBlur"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintEnd_toEndOf="parent" />
+
+        <!-- Language Switch -->
+        <Button
+            android:id="@+id/btnLanguage"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/switch_language"
+            style="?attr/borderlessButtonStyle"
+            android:layout_marginTop="16dp"
+            app:layout_constraintTop_toBottomOf="@id/btnToggleProtection"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintVertical_bias="0" />
+
+    </androidx.constraintlayout.widget.ConstraintLayout>
+
+</ScrollView>
+
+
+
+
+=== DIRECTORY: app/src/main/res/xml ===
+
+
+
+
+--- FILE: app/src/main/res/xml/accessibility_service_config.xml ---
+
+
+<?xml version="1.0" encoding="utf-8"?>
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeViewScrolled"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagRetrieveInteractiveWindows"
+    android:canRetrieveWindowContent="true"
+    android:description="@string/permission_accessibility_message"
+    android:notificationTimeout="100"
+    android:packageNames="" />
+
+
+
+
+--- FILE: app/src/main/res/xml/backup_rules.xml ---
+
+
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <exclude domain="sharedpref" path="." />
+</full-backup-content>
+
+
+
+
+--- FILE: app/src/main/res/xml/data_extraction_rules.xml ---
+
+
+<?xml version="1.0" encoding="utf-8"?>
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="." />
+    </device-transfer>
+</data-extraction-rules>
+
+
+
+
+--- FILE: app/src/main/AndroidManifest.xml ---
+
+
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Permissions -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- Internal app-only broadcast permission -->
+    <permission
+        android:name="com.tazkia.ai.blurfilter.PERMISSION_INTERNAL"
+        android:protectionLevel="signature" />
+
+    <application
+        android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Tazkia"
+        tools:targetApi="31">
+
+        <!-- Main Activity -->
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true"
+            android:screenOrientation="portrait">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Settings Activity -->
+        <activity
+            android:name=".ui.SettingsActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:parentActivityName=".ui.MainActivity" />
+
+        <!-- Accessibility Service -->
+        <service
+            android:name=".service.AccessibilityMonitorService"
+            android:exported="false"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
+        <!-- Screen Capture Service -->
+        <service
+            android:name=".service.ScreenCaptureService"
+            android:exported="false"
+            android:enabled="true"
+            android:foregroundServiceType="mediaProjection" />
+
+        <!-- Overlay Service -->
+        <service
+            android:name=".service.OverlayService"
+            android:exported="false" />
+
+    </application>
+
+</manifest>

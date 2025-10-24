@@ -12,6 +12,7 @@ import android.os.IBinder
 import android.util.Log
 import android.view.View
 import android.view.WindowManager
+import android.graphics.Rect
 
 class OverlayService : Service() {
 
@@ -98,6 +99,12 @@ class OverlayService : Service() {
                     blurredBitmap?.recycle()
                     blurredBitmap = bitmap
                     blurRegions = regions.toList()
+
+                    Log.d(TAG, "✓ UpdateBlur called with ${regions.size} regions")
+                    regions.forEachIndexed { index, rect ->
+                        Log.d(TAG, "  Region $index: $rect")
+                    }
+
                     invalidate()
                 } catch (e: Exception) {
                     Log.e(TAG, "Error updating blur", e)
@@ -112,6 +119,7 @@ class OverlayService : Service() {
                     blurredBitmap?.recycle()
                     blurredBitmap = null
                     blurRegions = emptyList()
+                    Log.d(TAG, "Blur cleared")
                     invalidate()
                 } catch (e: Exception) {
                     Log.e(TAG, "Error clearing blur", e)
@@ -128,40 +136,50 @@ class OverlayService : Service() {
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
 
-            val bitmap = blurredBitmap
-            if (bitmap == null || bitmap.isRecycled || blurRegions.isEmpty()) {
-                return
-            }
+            val bitmap = blurredBitmap ?: return
+            if (bitmap.isRecycled) return
 
             try {
+                // DON'T draw the full blurred bitmap - only draw the blurred regions!
+                // The blurred bitmap already has the regions blurred, so just draw those parts
+
+                if (blurRegions.isEmpty()) return
+
+                val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    isFilterBitmap = true
+                }
+
+                // Calculate scale factor from bitmap to screen
                 val scaleX = width.toFloat() / bitmap.width
                 val scaleY = height.toFloat() / bitmap.height
 
                 for (region in blurRegions) {
-                    val scaledRect = RectF(
+                    // Scale the region coordinates to screen size
+                    val screenRect = RectF(
                         region.left * scaleX,
                         region.top * scaleY,
                         region.right * scaleX,
                         region.bottom * scaleY
                     )
 
-                    val srcRect = android.graphics.Rect(
+                    // Source rect in bitmap
+                    val srcRect = Rect(
                         region.left.toInt().coerceIn(0, bitmap.width),
                         region.top.toInt().coerceIn(0, bitmap.height),
                         region.right.toInt().coerceIn(0, bitmap.width),
                         region.bottom.toInt().coerceIn(0, bitmap.height)
                     )
 
-                    if (srcRect.width() > 0 && srcRect.height() > 0) {
-                        canvas.drawBitmap(bitmap, srcRect, scaledRect, paint)
-                    }
+                    // Draw only this blurred region
+                    canvas.drawBitmap(bitmap, srcRect, screenRect, paint)
                 }
+
+                Log.d(TAG, "onDraw: Drew ${blurRegions.size} blurred regions")
             } catch (e: Exception) {
                 Log.e(TAG, "Error drawing blur", e)
                 e.printStackTrace()
             }
         }
-
         override fun onDetachedFromWindow() {
             super.onDetachedFromWindow()
             cleanup()
