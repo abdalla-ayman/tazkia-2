@@ -14,6 +14,7 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.graphics.RectF
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.Image
@@ -69,11 +70,20 @@ class ScreenCaptureService : Service() {
     private var screenHeight = 0
     private var screenDensity = 0
 
-    private var lastFrameHash: Long = 0
     private var currentFps = 0.5f
     private var isScrolling = false
     private var isProcessing = false
     private var frameCount = 0
+
+    // ============ DOUBLE BUFFERING VARIABLES ============
+    private var currentBlur: BlurData? = null
+    private val blurUpdateMutex = Mutex()
+
+    data class BlurData(
+        val bitmap: Bitmap,
+        val regions: List<RectF>,
+        val timestamp: Long
+    )
 
     companion object {
         private const val TAG = "ScreenCaptureService"
@@ -89,7 +99,10 @@ class ScreenCaptureService : Service() {
                     currentFps = 2f
                 }
                 AccessibilityMonitorService.ACTION_WINDOW_CHANGE -> {
-                    // Clear any caches if needed
+                    // Clear blur on window change
+                    serviceScope.launch {
+                        clearCurrentBlur()
+                    }
                 }
             }
         }
@@ -102,7 +115,6 @@ class ScreenCaptureService : Service() {
             Log.d(TAG, "========== SERVICE ONCREATE START ==========")
             prefManager = PreferenceManager(this)
 
-            // Initialize RenderScript with fallback
             renderScript = try {
                 RenderScript.create(this)
             } catch (e: Exception) {
@@ -110,7 +122,6 @@ class ScreenCaptureService : Service() {
                 null
             }
 
-            // Initialize models
             Log.d(TAG, "Initializing ModelManager...")
             modelManager = ModelManager(this)
             if (!modelManager.initializeModels(prefManager.useGpu)) {
@@ -127,7 +138,6 @@ class ScreenCaptureService : Service() {
             }
             Log.d(TAG, "Body detector initialized successfully")
 
-            // Get screen metrics
             val windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
             val metrics = DisplayMetrics()
             windowManager.defaultDisplay.getRealMetrics(metrics)
@@ -138,14 +148,13 @@ class ScreenCaptureService : Service() {
 
             Log.d(TAG, "Screen: ${screenWidth}x${screenHeight}, density: $screenDensity")
 
-            // Start capture thread
             captureThread = HandlerThread("CaptureThread").apply {
                 start()
             }
             captureHandler = Handler(captureThread!!.looper)
             Log.d(TAG, "Capture thread started")
 
-            // Register accessibility receiver
+            // Register accessibility receiver (optional - works without it)
             val filter = IntentFilter().apply {
                 addAction(AccessibilityMonitorService.ACTION_SCROLL_EVENT)
                 addAction(AccessibilityMonitorService.ACTION_WINDOW_CHANGE)
@@ -153,7 +162,6 @@ class ScreenCaptureService : Service() {
             LocalBroadcastManager.getInstance(this).registerReceiver(accessibilityReceiver, filter)
             Log.d(TAG, "Accessibility receiver registered")
 
-            // FIX: Start overlay service properly
             overlayService = OverlayService()
             overlayService?.start(this)
             Log.d(TAG, "Overlay service started")
@@ -170,7 +178,6 @@ class ScreenCaptureService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d(TAG, "========== ON START COMMAND ==========")
 
-        // Start foreground immediately
         startForeground(NOTIFICATION_ID, createNotification())
         Log.d(TAG, "Started foreground service")
 
@@ -205,7 +212,6 @@ class ScreenCaptureService : Service() {
                 return
             }
 
-            // Register callback
             mediaProjection?.registerCallback(object : MediaProjection.Callback() {
                 override fun onStop() {
                     Log.d(TAG, "MediaProjection stopped")
@@ -214,18 +220,14 @@ class ScreenCaptureService : Service() {
             }, captureHandler)
             Log.d(TAG, "MediaProjection callback registered")
 
-            // FIX: Use higher resolution for better detection
-            // Use at least 480p width for body detection to work reliably
-            val processingWidth = 720 // Increased from 480
+            val processingWidth = 720
             val processingHeight = (screenHeight * processingWidth / screenWidth)
 
             Log.d(TAG, "Processing resolution: ${processingWidth}x${processingHeight}")
             Log.d(TAG, "Screen resolution: ${screenWidth}x${screenHeight}")
 
-            // Close any existing ImageReader
             imageReader?.close()
 
-            // Create ImageReader
             imageReader = ImageReader.newInstance(
                 processingWidth,
                 processingHeight,
@@ -234,7 +236,6 @@ class ScreenCaptureService : Service() {
             )
             Log.d(TAG, "ImageReader created: ${processingWidth}x${processingHeight}")
 
-            // Create VirtualDisplay
             virtualDisplay = mediaProjection?.createVirtualDisplay(
                 "TazkiaCapture",
                 processingWidth,
@@ -265,7 +266,6 @@ class ScreenCaptureService : Service() {
 
         processingJob = serviceScope.launch {
             try {
-                // Wait a bit for VirtualDisplay to be ready
                 delay(500)
 
                 while (isActive) {
@@ -305,8 +305,9 @@ class ScreenCaptureService : Service() {
     private suspend fun captureAndProcess() {
         if (isProcessing) {
             if (frameCount % 20 == 0) {
-                Log.d(TAG, "Already processing, skipping frame")
+                Log.d(TAG, "Already processing, skipping frame - KEEPING EXISTING BLUR")
             }
+            // KEY DIFFERENCE: Don't clear blur, just skip frame
             return
         }
 
@@ -319,8 +320,9 @@ class ScreenCaptureService : Service() {
                 image = imageReader?.acquireLatestImage()
                 if (image == null) {
                     if (frameCount % 20 == 0) {
-                        Log.w(TAG, "No image available from ImageReader")
+                        Log.w(TAG, "No image available - KEEPING EXISTING BLUR")
                     }
+                    // KEY DIFFERENCE: Don't clear blur
                     return
                 }
 
@@ -335,7 +337,6 @@ class ScreenCaptureService : Service() {
                     Log.d(TAG, "Converted to bitmap: ${bitmap.width}x${bitmap.height}")
                 }
 
-                // Process the frame
                 processFrame(bitmap)
 
             } catch (e: Exception) {
@@ -348,17 +349,16 @@ class ScreenCaptureService : Service() {
             }
         }
     }
-    // BULLETPROOF FIX: Replace these two functions
 
+    // ============ DOUBLE BUFFERING IMPLEMENTATION ============
 
-    private fun processFrame(bitmap: Bitmap) {
+    private suspend fun processFrame(bitmap: Bitmap) {
         var detectionBitmap: Bitmap? = null
         try {
             if (frameCount % 10 == 0) {
                 Log.d(TAG, "========== PROCESS FRAME #$frameCount START ==========")
             }
 
-            // CHECK 1: Is bitmap valid?
             if (bitmap.isRecycled) {
                 Log.e(TAG, "ERROR: Bitmap is already recycled before processing!")
                 return
@@ -370,17 +370,18 @@ class ScreenCaptureService : Service() {
                 return
             }
 
-            // CREATE A FRESH COPY for MediaPipe (it will recycle this one)
+            // Create detection copy
             detectionBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(detectionBitmap)
             canvas.drawBitmap(bitmap, 0f, 0f, null)
 
-            Log.d(TAG, "Created detection copy: ${detectionBitmap.width}x${detectionBitmap.height}")
+            if (frameCount % 10 == 0) {
+                Log.d(TAG, "Created detection copy: ${detectionBitmap.width}x${detectionBitmap.height}")
+            }
 
-            // Give MediaPipe the COPY (not the original)
+            // Run detection
             val bodies = detector.detectBodies(detectionBitmap)
 
-            // CHECK 2: Original bitmap should still be fine
             if (bitmap.isRecycled) {
                 Log.e(TAG, "ERROR: Original bitmap was somehow recycled!")
                 return
@@ -390,31 +391,49 @@ class ScreenCaptureService : Service() {
                 Log.d(TAG, "Detection returned ${bodies.size} bodies")
             }
 
+            // ============ KEY LOGIC: Only update if we have NEW data ============
             if (bodies.isEmpty()) {
+                // DON'T clear blur - just skip this frame and keep showing existing blur
                 if (frameCount % 10 == 0) {
-                    Log.w(TAG, "No bodies detected, clearing blur")
+                    Log.d(TAG, "No bodies detected - KEEPING EXISTING BLUR")
                 }
-                overlayService?.clearBlur()
                 return
             }
 
-            Log.d(TAG, "✓✓✓ FOUND ${bodies.size} BODIES! Applying blur...")
+            // We have detections! Update blur
+            if (frameCount % 10 == 0) {
+                Log.d(TAG, "✓✓✓ FOUND ${bodies.size} BODIES! Updating blur...")
+            }
 
             bodies.forEachIndexed { index, body ->
                 Log.d(TAG, "Body $index: bbox=${body.boundingBox}, confidence=${body.confidence}")
             }
 
-            // CHECK 3: One more check before blur
             if (bitmap.isRecycled) {
                 Log.e(TAG, "ERROR: Bitmap recycled before blur!")
                 return
             }
 
-            // Use ORIGINAL bitmap for blurring
+            // Apply blur to detected regions
             val blurredBitmap = applyBlurToRegions(bitmap, bodies)
+            val regions = bodies.map { it.boundingBox }
 
-            Log.d(TAG, "Blur applied, updating overlay...")
-            overlayService?.updateBlur(blurredBitmap, bodies.map { it.boundingBox })
+            // Double buffering: Safely swap blur data
+            blurUpdateMutex.withLock {
+                // Recycle old blur bitmap
+                currentBlur?.bitmap?.recycle()
+
+                // Store new blur
+                currentBlur = BlurData(
+                    bitmap = blurredBitmap,
+                    regions = regions,
+                    timestamp = System.currentTimeMillis()
+                )
+            }
+
+            // Update overlay with new blur
+            Log.d(TAG, "Updating overlay with ${regions.size} regions...")
+            overlayService?.updateBlur(blurredBitmap, regions)
 
             if (frameCount % 10 == 0) {
                 Log.d(TAG, "========== PROCESS FRAME #$frameCount END ==========")
@@ -423,20 +442,31 @@ class ScreenCaptureService : Service() {
         } catch (e: Exception) {
             Log.e(TAG, "Error in processFrame", e)
             e.printStackTrace()
-            overlayService?.clearBlur()
+            // DON'T clear blur on error - keep existing
         } finally {
-            // detectionBitmap might already be recycled by MediaPipe, that's OK
             if (detectionBitmap?.isRecycled == false) {
                 detectionBitmap.recycle()
             }
-            // Recycle original bitmap
             if (!bitmap.isRecycled) {
                 bitmap.recycle()
             }
         }
     }
 
-    // 3. Keep applyBlurToRegions the same as before
+    /**
+     * Clear current blur (called on window change)
+     */
+    private suspend fun clearCurrentBlur() {
+        blurUpdateMutex.withLock {
+            currentBlur?.bitmap?.recycle()
+            currentBlur = null
+        }
+        overlayService?.clearBlur()
+        Log.d(TAG, "Current blur cleared")
+    }
+
+    // ============ BLUR APPLICATION ============
+
     private fun applyBlurToRegions(
         bitmap: Bitmap,
         regions: List<BodyDetectorMediaPipe.BodyDetection>
@@ -478,9 +508,9 @@ class ScreenCaptureService : Service() {
 
                 val regionBitmap = ImageUtils.cropRegion(bitmap, rect)
 
-                // Apply STRONG blur (multiple passes)
+                // Apply strong blur
                 val blurred = if (renderScript != null) {
-                    val blurRadius = 25 // Maximum
+                    val blurRadius = 25
                     var result = regionBitmap
                     repeat(3) {
                         val temp = ImageUtils.applyRenderScriptBlur(renderScript!!, result, blurRadius)
@@ -518,6 +548,7 @@ class ScreenCaptureService : Service() {
         Log.d(TAG, "========== BLUR COMPLETE ==========")
         return result
     }
+
     private fun imageToBitmap(image: Image): Bitmap {
         val planes = image.planes
         val buffer = planes[0].buffer
@@ -535,12 +566,12 @@ class ScreenCaptureService : Service() {
         return if (rowPadding == 0) {
             bitmap
         } else {
-            // Create a clean copy without padding
             val cropped = Bitmap.createBitmap(bitmap, 0, 0, image.width, image.height)
             bitmap.recycle()
             cropped
         }
     }
+
     private fun createNotification(): Notification {
         createNotificationChannel()
 
@@ -597,6 +628,10 @@ class ScreenCaptureService : Service() {
             captureThread?.quitSafely()
             captureThread = null
             captureHandler = null
+
+            // Clean up blur data
+            currentBlur?.bitmap?.recycle()
+            currentBlur = null
 
             prefManager.isProtectionRunning = false
 
