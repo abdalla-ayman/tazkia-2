@@ -149,13 +149,13 @@ class GenderClassifier(private val interpreter: Interpreter) {
      */
     fun classifyBatch(
         bitmap: Bitmap,
-        bodies: List<BodyDetectorMediaPipe.BodyDetection>,
+        bodies: List<BodyDetectorMediaPipe.BodyDetection>,  // Simplified - no landmarks needed!
         orientations: Map<String, String> = emptyMap()
     ): Map<String, GenderResult> {
         val results = mutableMapOf<String, GenderResult>()
 
         for (body in bodies) {
-            val orientation = orientations[body.id] ?: "frontal"
+            val orientation = "frontal" // Default since we don't have landmarks
             val result = classifyGender(bitmap, body.boundingBox, body.id, orientation)
             results[body.id] = result
         }
@@ -163,60 +163,6 @@ class GenderClassifier(private val interpreter: Interpreter) {
         return results
     }
 
-    /**
-     * Classify with manual feature extraction (alternative approach)
-     * Useful if you don't have a trained full-body model
-     *
-     * THIS IS A FALLBACK METHOD using heuristics:
-     * - Body aspect ratio (height/width)
-     * - Upper body shape
-     * - Clothing color patterns
-     *
-     * NOTE: Less accurate than trained model, but works without custom training
-     */
-    fun classifyWithHeuristics(
-        bitmap: Bitmap,
-        bodyRect: RectF,
-        landmarks: List<BodyDetectorMediaPipe.Landmark>
-    ): GenderResult {
-        // Extract features
-        val aspectRatio = bodyRect.height() / bodyRect.width()
-
-        // Heuristic 1: Body aspect ratio
-        // Typically: female bodies have higher aspect ratio (more elongated)
-        val aspectScore = if (aspectRatio > 2.0f) 0.6f else 0.4f
-
-        // Heuristic 2: Shoulder to hip ratio
-        val shoulderWidth = calculateShoulderWidth(landmarks)
-        val hipWidth = calculateHipWidth(landmarks)
-        val shoulderHipRatio = if (hipWidth > 0) shoulderWidth / hipWidth else 1.0f
-
-        // Typically: male shoulders wider than hips, female more balanced
-        val ratioScore = if (shoulderHipRatio < 1.2f) 0.6f else 0.4f
-
-        // Combine scores
-        val femaleScore = (aspectScore + ratioScore) / 2
-        val maleScore = 1.0f - femaleScore
-
-        val gender = if (femaleScore > maleScore) GENDER_FEMALE else GENDER_MALE
-        val confidence = kotlin.math.max(femaleScore, maleScore)
-
-        return GenderResult(gender, confidence * 0.7f) // Lower confidence for heuristics
-    }
-
-    private fun calculateShoulderWidth(landmarks: List<BodyDetectorMediaPipe.Landmark>): Float {
-        if (landmarks.size < 13) return 0f
-        val leftShoulder = landmarks[11]
-        val rightShoulder = landmarks[12]
-        return kotlin.math.abs(leftShoulder.x - rightShoulder.x)
-    }
-
-    private fun calculateHipWidth(landmarks: List<BodyDetectorMediaPipe.Landmark>): Float {
-        if (landmarks.size < 25) return 0f
-        val leftHip = landmarks[23]
-        val rightHip = landmarks[24]
-        return kotlin.math.abs(leftHip.x - rightHip.x)
-    }
 
     /**
      * Clear cache

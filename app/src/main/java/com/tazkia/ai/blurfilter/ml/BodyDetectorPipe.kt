@@ -3,316 +3,161 @@ package com.tazkia.ai.blurfilter.ml
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.RectF
+import android.util.Log
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
-import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker
-import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker.PoseLandmarkerOptions
+import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetector
+import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetectorResult
 import kotlin.math.max
 import kotlin.math.min
-import android.util.Log
 
 /**
- * Full body detector using MediaPipe Pose Landmarker
+ * Person detector using MediaPipe Object Detection (EfficientDet-Lite0)
  *
  * DETECTS:
- * - 33 body landmarks (nose to feet)
- * - Full body bounding box
- * - Visibility score for each landmark
+ * - People in any pose/orientation
+ * - Bounding boxes with confidence scores
  *
- * ADVANTAGES over face-only detection:
- * - Detects people even when face is not visible
- * - Better gender classification (body shape, clothing, posture)
- * - More robust to occlusion
- * - Works with side profiles, back views
+ * ADVANTAGES over pose detection:
+ * - 2-3x faster inference
+ * - Works with partial occlusions
+ * - Detects sitting, lying, back views
+ * - Simpler output (just boxes)
  */
 class BodyDetectorMediaPipe(private val context: Context) {
 
-    private var detector: PoseLandmarker? = null
+    private var detector: ObjectDetector? = null
 
     companion object {
-        private const val MODEL_NAME = "pose_landmarker_lite.task"
-        private const val MIN_DETECTION_CONFIDENCE = 0.3f  // Lower from 0.5f
-        private const val MIN_TRACKING_CONFIDENCE = 0.3f   // Lower from 0.5f
-        private const val MIN_PRESENCE_CONFIDENCE = 0.3f   // Lower from 0.5f
-
-        // MediaPipe Pose Landmarks indices
-        const val NOSE = 0
-        const val LEFT_EYE = 2
-        const val RIGHT_EYE = 5
-        const val LEFT_SHOULDER = 11
-        const val RIGHT_SHOULDER = 12
-        const val LEFT_HIP = 23
-        const val RIGHT_HIP = 24
-        const val LEFT_KNEE = 25
-        const val RIGHT_KNEE = 26
-        const val LEFT_ANKLE = 27
-        const val RIGHT_ANKLE = 28
+        private const val TAG = "BodyDetectorMediaPipe"
+        private const val MODEL_NAME = "efficientdet_lite0.tflite"
+        private const val MIN_DETECTION_CONFIDENCE = 0.4f  // Adjust as needed
+        private const val MAX_RESULTS = 5  // Detect up to 5 people
     }
 
     data class BodyDetection(
         val boundingBox: RectF,
-        val landmarks: List<Landmark>,
         val confidence: Float,
         val id: String
     )
 
-    data class Landmark(
-        val x: Float,
-        val y: Float,
-        val z: Float,
-        val visibility: Float,
-        val presence: Float
-    )
-
     /**
-     * Initialize MediaPipe pose detector
+     * Initialize MediaPipe object detector
      */
     fun initialize(): Boolean {
         return try {
+            Log.d(TAG, "Initializing EfficientDet-Lite0 object detector...")
+
             val baseOptions = BaseOptions.builder()
                 .setModelAssetPath(MODEL_NAME)
                 .build()
 
-            val options = PoseLandmarkerOptions.builder()
+            val options = com.google.mediapipe.tasks.vision.objectdetector.ObjectDetector.ObjectDetectorOptions.builder()
                 .setBaseOptions(baseOptions)
-                .setMinPoseDetectionConfidence(MIN_DETECTION_CONFIDENCE)
-                .setMinTrackingConfidence(MIN_TRACKING_CONFIDENCE)
-                .setMinPosePresenceConfidence(MIN_PRESENCE_CONFIDENCE)
-                .setNumPoses(5) // Detect up to 5 people
+                .setScoreThreshold(MIN_DETECTION_CONFIDENCE)
+                .setMaxResults(MAX_RESULTS)
                 .setRunningMode(RunningMode.IMAGE)
                 .build()
 
-            detector = PoseLandmarker.createFromOptions(context, options)
+            detector = ObjectDetector.createFromOptions(context, options)
+            Log.d(TAG, "✅ Object detector initialized successfully")
             true
         } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to initialize detector", e)
             e.printStackTrace()
             false
         }
     }
 
     /**
-     * Detect full bodies in image
-     *
-     * HOW IT WORKS:
-     * 1. MediaPipe detects 33 landmarks per person
-     * 2. We calculate bounding box from visible landmarks
-     * 3. Return full body regions for gender classification
+     * Detect people in image
      *
      * @param bitmap Input image
-     * @return List of detected bodies with bounding boxes
+     * @return List of detected people with bounding boxes
      */
     fun detectBodies(bitmap: Bitmap): List<BodyDetection> {
         val mpDetector = detector ?: run {
-            Log.e("BodyDetector", "Detector is null!")
+            Log.e(TAG, "Detector is null!")
             return emptyList()
         }
 
         return try {
-            Log.d("BodyDetector", "Starting detection on ${bitmap.width}x${bitmap.height} image")
+            Log.d(TAG, "Starting detection on ${bitmap.width}x${bitmap.height} image")
 
             // Convert to MediaPipe image format
             val mpImage = BitmapImageBuilder(bitmap).build()
 
-            // Run pose detection (~20-30ms for lite, ~50ms for heavy)
+            // Run object detection (~30-40ms for int8)
             val startTime = System.currentTimeMillis()
             val result = mpDetector.detect(mpImage)
             val detectionTime = System.currentTimeMillis() - startTime
 
-            Log.d("BodyDetector", "Detection completed in ${detectionTime}ms, found ${result.landmarks().size} people")
+            Log.d(TAG, "Detection completed in ${detectionTime}ms")
 
-            mpImage.close() // Release MediaPipe image
+            mpImage.close()
 
-            // Convert results to our format
-            val detections = mutableListOf<BodyDetection>()
-
-            result.landmarks().forEachIndexed { index, landmarkList ->
-                Log.d("BodyDetector", "Processing person $index with ${landmarkList.size} landmarks")
-
-                // Convert MediaPipe landmarks to our format
-                val landmarks = landmarkList.map { landmark ->
-                    Landmark(
-                        x = landmark.x() * bitmap.width,
-                        y = landmark.y() * bitmap.height,
-                        z = landmark.z(),
-                        visibility = if (landmark.visibility().isPresent) landmark.visibility().get() else 1.0f,
-                        presence = if (landmark.presence().isPresent) landmark.presence().get() else 1.0f
-                    )
+            // Filter for "person" detections only
+            val personDetections = result.detections()
+                .filter { detection ->
+                    detection.categories().any { category ->
+                        category.categoryName().equals("person", ignoreCase = true)
+                    }
                 }
 
-                // Calculate bounding box from visible landmarks
-                val boundingBox = calculateBoundingBox(landmarks, bitmap.width, bitmap.height)
+            Log.d(TAG, "Found ${personDetections.size} person(s)")
 
-                // Get confidence (average of key landmarks visibility)
-                val confidence = calculateConfidence(landmarks)
+            // Convert to our format
+            personDetections.mapIndexed { index, detection ->
+                val boundingBox = detection.boundingBox()
 
-                // Generate unique ID
-                val id = generateId(boundingBox, index)
+                val rect = RectF(
+                    boundingBox.left.toFloat(),
+                    boundingBox.top.toFloat(),
+                    boundingBox.right.toFloat(),
+                    boundingBox.bottom.toFloat()
+                )
 
-                Log.d("BodyDetector", "Person $index: bbox=$boundingBox, confidence=$confidence")
+                // Add 10% padding to bounding box for better blur coverage
+                val width = rect.width()
+                val height = rect.height()
+                val paddingX = width * 0.1f
+                val paddingY = height * 0.1f
 
-                detections.add(
-                    BodyDetection(
-                        boundingBox = boundingBox,
-                        landmarks = landmarks,
-                        confidence = confidence,
-                        id = id
-                    )
+                val paddedRect = RectF(
+                    max(0f, rect.left - paddingX),
+                    max(0f, rect.top - paddingY),
+                    min(bitmap.width.toFloat(), rect.right + paddingX),
+                    min(bitmap.height.toFloat(), rect.bottom + paddingY)
+                )
+
+                val confidence = detection.categories()
+                    .firstOrNull { it.categoryName().equals("person", ignoreCase = true) }
+                    ?.score() ?: 0f
+
+                val id = generateId(paddedRect, index)
+
+                Log.d(TAG, "Person $index: bbox=$paddedRect, confidence=$confidence")
+
+                BodyDetection(
+                    boundingBox = paddedRect,
+                    confidence = confidence,
+                    id = id
                 )
             }
 
-            Log.d("BodyDetector", "Returning ${detections.size} detections")
-            detections
-
         } catch (e: Exception) {
-            Log.e("BodyDetector", "Detection failed!", e)
+            Log.e(TAG, "Detection failed!", e)
             e.printStackTrace()
             emptyList()
         }
     }
-    /**
-     * Calculate bounding box from body landmarks
-     *
-     * Strategy:
-     * 1. Find min/max x,y from all VISIBLE landmarks
-     * 2. Add padding (20% on each side)
-     * 3. Ensure box doesn't go outside image
-     */
-    private fun calculateBoundingBox(
-        landmarks: List<Landmark>,
-        imageWidth: Int,
-        imageHeight: Int
-    ): RectF {
-        // Filter only visible landmarks (visibility > 0.5)
-        val visibleLandmarks = landmarks.filter { it.visibility > 0.5f }
-
-        if (visibleLandmarks.isEmpty()) {
-            // Fallback: use all landmarks
-            return calculateBoundingBoxFromAll(landmarks, imageWidth, imageHeight)
-        }
-
-        // Find bounds
-        val minX = visibleLandmarks.minOf { it.x }
-        val maxX = visibleLandmarks.maxOf { it.x }
-        val minY = visibleLandmarks.minOf { it.y }
-        val maxY = visibleLandmarks.maxOf { it.y }
-
-        val width = maxX - minX
-        val height = maxY - minY
-
-        // Add 20% padding
-        val paddingX = width * 0.2f
-        val paddingY = height * 0.2f
-
-        return RectF(
-            max(0f, minX - paddingX),
-            max(0f, minY - paddingY),
-            min(imageWidth.toFloat(), maxX + paddingX),
-            min(imageHeight.toFloat(), maxY + paddingY)
-        )
-    }
 
     /**
-     * Fallback: calculate bounding box from all landmarks
-     */
-    private fun calculateBoundingBoxFromAll(
-        landmarks: List<Landmark>,
-        imageWidth: Int,
-        imageHeight: Int
-    ): RectF {
-        val minX = landmarks.minOf { it.x }
-        val maxX = landmarks.maxOf { it.x }
-        val minY = landmarks.minOf { it.y }
-        val maxY = landmarks.maxOf { it.y }
-
-        val width = maxX - minX
-        val height = maxY - minY
-
-        val paddingX = width * 0.2f
-        val paddingY = height * 0.2f
-
-        return RectF(
-            max(0f, minX - paddingX),
-            max(0f, minY - paddingY),
-            min(imageWidth.toFloat(), maxX + paddingX),
-            min(imageHeight.toFloat(), maxY + paddingY)
-        )
-    }
-
-    /**
-     * Calculate detection confidence
-     * Average visibility of key landmarks (shoulders, hips, face)
-     */
-    private fun calculateConfidence(landmarks: List<Landmark>): Float {
-        if (landmarks.size < 33) return 0f
-
-        val keyLandmarks = listOf(
-            landmarks[NOSE],
-            landmarks[LEFT_SHOULDER],
-            landmarks[RIGHT_SHOULDER],
-            landmarks[LEFT_HIP],
-            landmarks[RIGHT_HIP]
-        )
-
-        return if (keyLandmarks.isEmpty()) 0f else keyLandmarks.map { it.visibility }.average().toFloat()    }
-
-    /**
-     * Generate unique ID for body
+     * Generate unique ID for person
      */
     private fun generateId(rect: RectF, index: Int): String {
         return "${rect.centerX().toInt()}_${rect.centerY().toInt()}_${rect.width().toInt()}_$index"
-    }
-
-    /**
-     * Get specific landmark by index
-     */
-    fun getLandmark(detection: BodyDetection, index: Int): Landmark? {
-        return if (index < detection.landmarks.size) {
-            detection.landmarks[index]
-        } else null
-    }
-
-    /**
-     * Check if person is facing camera (useful for filtering)
-     */
-    fun isFacingCamera(detection: BodyDetection): Boolean {
-        val nose = getLandmark(detection, NOSE)
-        val leftShoulder = getLandmark(detection, LEFT_SHOULDER)
-        val rightShoulder = getLandmark(detection, RIGHT_SHOULDER)
-
-        if (nose == null || leftShoulder == null || rightShoulder == null) return false
-
-        // Check if nose is between shoulders (frontal view)
-        val shoulderMidX = (leftShoulder.x + rightShoulder.x) / 2
-        val deviation = kotlin.math.abs(nose.x - shoulderMidX)
-        val shoulderWidth = kotlin.math.abs(leftShoulder.x - rightShoulder.x)
-
-        return deviation < shoulderWidth * 0.3f
-    }
-
-    /**
-     * Get body orientation (useful for classification)
-     */
-    fun getBodyOrientation(detection: BodyDetection): String {
-        val leftShoulder = getLandmark(detection, LEFT_SHOULDER)
-        val rightShoulder = getLandmark(detection, RIGHT_SHOULDER)
-        val leftHip = getLandmark(detection, LEFT_HIP)
-        val rightHip = getLandmark(detection, RIGHT_HIP)
-
-        if (leftShoulder == null || rightShoulder == null ||
-            leftHip == null || rightHip == null) {
-            return "unknown"
-        }
-
-        // Calculate if left or right side is more visible
-        val leftVisibility = (leftShoulder.visibility + leftHip.visibility) / 2
-        val rightVisibility = (rightShoulder.visibility + rightHip.visibility) / 2
-
-        return when {
-            leftVisibility > rightVisibility + 0.2f -> "left_profile"
-            rightVisibility > leftVisibility + 0.2f -> "right_profile"
-            else -> "frontal"
-        }
     }
 
     /**
@@ -321,5 +166,6 @@ class BodyDetectorMediaPipe(private val context: Context) {
     fun close() {
         detector?.close()
         detector = null
+        Log.d(TAG, "Detector closed")
     }
 }

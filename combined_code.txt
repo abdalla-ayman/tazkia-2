@@ -5,6 +5,64 @@
 
 
 
+--- FILE: app/src/main/java/com/tazkia/ai/blurfilter/ml/PersonDetector.kt ---
+
+
+package com.tazkia.ai.blurfilter.ml
+
+import android.content.Context
+import android.graphics.Bitmap
+import android.util.Log
+import com.google.mediapipe.framework.image.BitmapImageBuilder
+import com.google.mediapipe.tasks.vision.core.RunningMode
+import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetector
+import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetectorOptions
+import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetectorResult
+
+class PersonDetector(context: Context) {
+
+    private val detector: ObjectDetector
+    private val TAG = "PersonDetector"
+
+    init {
+        val baseOptions = ObjectDetectorOptions.BaseOptions.builder()
+            // 👉 choose the file you actually have in assets:
+            .setModelAssetPath("ssd_mobilenet_v2.tflite")     // or "ssd_mobilenet_v2.tflite"
+            .build()
+
+        val options = ObjectDetectorOptions.builder()
+            .setBaseOptions(baseOptions)
+            .setScoreThreshold(0.4f)           // lower for more sensitivity
+            .setRunningMode(RunningMode.IMAGE)
+            .build()
+
+        detector = ObjectDetector.createFromOptions(context, options)
+        Log.d(TAG, "✅ Object detector loaded successfully")
+    }
+
+    fun detectPeople(bitmap: Bitmap): List<ObjectDetectorResult.Detection> {
+        val image = BitmapImageBuilder(bitmap).build()
+        val result = detector.detect(image)
+
+        val detections = result.detections.filter { d ->
+            d.categories.any { it.categoryName.equals("person", ignoreCase = true) }
+        }
+
+        if (detections.isEmpty())
+            Log.d(TAG, "⚠️ No person detected")
+        else
+            Log.d(TAG, "👤 Detected ${detections.size} person(s)")
+
+        return detections
+    }
+
+    fun close() = detector.close()
+}
+
+
+
+
+
 --- FILE: app/src/main/java/com/tazkia/ai/blurfilter/ml/GenderClassifier.kt ---
 
 
