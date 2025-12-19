@@ -98,12 +98,9 @@ class BodyDetectorMediaPipe(private val context: Context) {
             mpImage.close()
 
             // Filter for "person" detections only
-            val personDetections = result.detections()
-                .filter { detection ->
-                    detection.categories().any { category ->
-                        category.categoryName().equals("person", ignoreCase = true)
-                    }
-                }
+            val personDetections = result.detections().filter { detection ->
+                detection.categories().any { it.categoryName().equals("person", ignoreCase = true) }
+            }
 
             Log.d(TAG, "Found ${personDetections.size} person(s)")
 

@@ -51,28 +51,21 @@ object ImageUtils {
     /**
      * Apply pixelation effect (Alternative to blur)
      */
+// In ImageUtils.kt
     fun applyPixelation(bitmap: Bitmap, pixelSize: Int): Bitmap {
-        val width = bitmap.width
-        val height = bitmap.height
-        val result = Bitmap.createBitmap(width, height, bitmap.config)
+        val result = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(result)
         val paint = Paint()
 
-        val smallWidth = width / pixelSize
-        val smallHeight = height / pixelSize
+        // FIX: Use bitmap.width and bitmap.height
+        val smallWidth = Math.max(1, bitmap.width / pixelSize)
+        val smallHeight = Math.max(1, bitmap.height / pixelSize)
 
         val small = Bitmap.createScaledBitmap(bitmap, smallWidth, smallHeight, false)
-        canvas.drawBitmap(
-            small,
-            null,
-            Rect(0, 0, width, height),
-            paint
-        )
-
+        canvas.drawBitmap(small, null, Rect(0, 0, bitmap.width, bitmap.height), paint)
         small.recycle()
         return result
     }
-
     /**
      * Calculate perceptual hash for motion detection
      */
