@@ -22,7 +22,7 @@ class ModelManager(private val context: Context) {
         return try {
             Log.d(TAG, "Initializing models...")
 
-            // Initialize body detector
+            // Initialize body detector (REQUIRED)
             bodyDetector = BodyDetectorMediaPipe(context)
             val bodySuccess = bodyDetector?.initialize() ?: false
 
@@ -32,18 +32,23 @@ class ModelManager(private val context: Context) {
             }
             Log.d(TAG, "✅ Body detector initialized")
 
-            // Initialize gender classifier
-            genderInterpreter = loadModelFile(GENDER_MODEL_NAME, useGpu)
-            if (genderInterpreter == null) {
-                Log.e(TAG, "Failed to load gender model")
-                return false
+            // Initialize gender classifier (OPTIONAL - don't fail if missing)
+            try {
+                genderInterpreter = loadModelFile(GENDER_MODEL_NAME, useGpu)
+                if (genderInterpreter != null) {
+                    genderClassifier = GenderClassifier(genderInterpreter!!)
+                    Log.d(TAG, "✅ Gender classifier initialized")
+                } else {
+                    Log.w(TAG, "⚠️ Gender classifier not available - will blur all people")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "⚠️ Failed to load gender model - will blur all people", e)
+                genderInterpreter = null
+                genderClassifier = null
             }
 
-            genderClassifier = GenderClassifier(genderInterpreter!!)
-            Log.d(TAG, "✅ Gender classifier initialized")
-
-            Log.d(TAG, "All models initialized successfully")
-            true
+            Log.d(TAG, "Models initialized successfully (body: ✅, gender: ${if (genderClassifier != null) "✅" else "❌"})")
+            true // Return true even if gender classifier failed
         } catch (e: Exception) {
             Log.e(TAG, "Error initializing models", e)
             e.printStackTrace()

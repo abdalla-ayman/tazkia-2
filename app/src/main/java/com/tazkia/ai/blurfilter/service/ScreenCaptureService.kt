@@ -168,9 +168,13 @@ class ScreenCaptureService : Service() {
 
         Log.d(TAG, "Service is now in foreground")
 
-        // NOW start media projection (after foreground started)
-        startMediaProjection(mediaProjectionData)
-        startProcessing()
+        // CRITICAL: Add delay to ensure foreground status is fully registered
+        // Android 14+ requires this delay before starting media projection
+        mainHandler.postDelayed({
+            startMediaProjection(mediaProjectionData)
+            startProcessing()
+        }, 100) // 100ms delay
+
         return START_STICKY
     }
 
@@ -232,7 +236,11 @@ class ScreenCaptureService : Service() {
             Log.d(TAG, "Media projection started successfully")
         } catch (e: Exception) {
             Log.e(TAG, "Error starting media projection", e)
-            stopSelf()
+            e.printStackTrace()
+
+            // Don't call stopSelf() here - service is already in foreground
+            // Just show error to user via notification
+            showErrorNotification("Failed to start screen capture: ${e.message}")
         }
     }
 
@@ -525,6 +533,24 @@ class ScreenCaptureService : Service() {
             val notificationManager = getSystemService(NotificationManager::class.java)
             notificationManager?.createNotificationChannel(channel)
         }
+    }
+
+    private fun showErrorNotification(errorMessage: String) {
+        val notificationManager = getSystemService(NotificationManager::class.java)
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("Tazkia Error")
+            .setContentText(errorMessage)
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .build()
+
+        notificationManager?.notify(NOTIFICATION_ID + 1, notification)
+
+        // Stop service after showing error
+        mainHandler.postDelayed({
+            stopSelf()
+        }, 3000) // Give user time to see the error
     }
 
     override fun onDestroy() {
