@@ -3,33 +3,19 @@ package com.tazkia.ai.blurfilter.ml
 import android.graphics.Bitmap
 import android.graphics.Rect
 import android.graphics.RectF
+import android.util.Log
 import android.util.LruCache
 import com.tazkia.ai.blurfilter.utils.ImageUtils
 import org.tensorflow.lite.Interpreter
 
 /**
  * Full body gender classifier using TensorFlow Lite
- *
- * WORKS WITH:
- * - MediaPipe Pose Detection results
- * - Full body bounding boxes
- *
- * CLASSIFICATION SIGNALS:
- * - Body shape and silhouette
- * - Clothing patterns and style
- * - Hair length and style
- * - Overall appearance
- * - Posture and stance
- *
- * ADVANTAGES over face-only:
- * - Works even when face is not visible
- * - More robust to lighting, angles, occlusion
- * - Higher accuracy (body provides more visual cues)
- * - Cultural sensitivity (respects head coverings)
+ * Model: MobileNetV3 optimized for gender classification
  */
 class GenderClassifier(private val interpreter: Interpreter) {
 
     companion object {
+        private const val TAG = "GenderClassifier"
         private const val INPUT_SIZE = 224 // Model input size
         private const val CONFIDENCE_THRESHOLD = 0.6f
         const val GENDER_FEMALE = 0
@@ -55,12 +41,6 @@ class GenderClassifier(private val interpreter: Interpreter) {
 
     /**
      * Classify gender from full body detection
-     *
-     * @param bitmap Original screen capture
-     * @param bodyRect Full body bounding box from MediaPipe
-     * @param bodyId Unique ID for caching
-     * @param orientation Body orientation (frontal, left_profile, right_profile)
-     * @return GenderResult with classification
      */
     fun classifyGender(
         bitmap: Bitmap,
@@ -69,7 +49,10 @@ class GenderClassifier(private val interpreter: Interpreter) {
         orientation: String = "frontal"
     ): GenderResult {
         // Check cache first
-        cache.get(bodyId)?.let { return it }
+        cache.get(bodyId)?.let {
+            Log.d(TAG, "Cache hit for $bodyId")
+            return it
+        }
 
         // Crop body region
         val rect = Rect(
@@ -81,31 +64,35 @@ class GenderClassifier(private val interpreter: Interpreter) {
 
         // Validate rect size
         if (rect.width() < 20 || rect.height() < 20) {
+            Log.w(TAG, "Body region too small: ${rect.width()}x${rect.height()}")
             return GenderResult(GENDER_UNKNOWN, 0f)
         }
 
         val bodyBitmap = try {
             ImageUtils.cropRegion(bitmap, rect)
         } catch (e: Exception) {
+            Log.e(TAG, "Failed to crop body region", e)
             return GenderResult(GENDER_UNKNOWN, 0f)
         }
 
-        // Prepare input for model
-        // Model expects: 224x224 RGB image
+        // Prepare input for model (224x224 RGB, quantized uint8)
         val inputBuffer = ImageUtils.bitmapToByteBuffer(
             bodyBitmap,
             INPUT_SIZE,
             isQuantized = true
         )
 
-        // Prepare output
-        // Option 1: Simple output [female_prob, male_prob]
+        // Prepare output [female_prob, male_prob]
         val output = Array(1) { FloatArray(2) }
 
-        // Run inference (~100-150ms on CPU, ~30ms on GPU)
+        // Run inference
         try {
+            val startTime = System.currentTimeMillis()
             interpreter.run(inputBuffer, output)
+            val inferenceTime = System.currentTimeMillis() - startTime
+            Log.d(TAG, "Gender inference took ${inferenceTime}ms")
         } catch (e: Exception) {
+            Log.e(TAG, "Inference failed", e)
             e.printStackTrace()
             bodyBitmap.recycle()
             return GenderResult(GENDER_UNKNOWN, 0f)
@@ -118,8 +105,7 @@ class GenderClassifier(private val interpreter: Interpreter) {
         val gender = if (femaleProb > maleProb) GENDER_FEMALE else GENDER_MALE
         val confidence = if (femaleProb > maleProb) femaleProb else maleProb
 
-        // Adjust confidence based on orientation
-        // Frontal views are more reliable than profiles
+        // Adjust confidence based on orientation (frontal views are more reliable)
         val adjustedConfidence = when (orientation) {
             "frontal" -> confidence
             "left_profile", "right_profile" -> confidence * 0.9f
@@ -132,6 +118,8 @@ class GenderClassifier(private val interpreter: Interpreter) {
             GenderResult(GENDER_UNKNOWN, adjustedConfidence)
         }
 
+        Log.d(TAG, "Classification for $bodyId: gender=$gender, confidence=$adjustedConfidence, female=$femaleProb, male=$maleProb")
+
         // Cache result
         cache.put(bodyId, result)
 
@@ -141,21 +129,18 @@ class GenderClassifier(private val interpreter: Interpreter) {
 
     /**
      * Batch classify multiple bodies
-     *
-     * @param bitmap Original image
-     * @param bodies List of body detections
-     * @param orientations Map of body IDs to orientations
-     * @return Map of body IDs to gender results
      */
     fun classifyBatch(
         bitmap: Bitmap,
-        bodies: List<BodyDetectorMediaPipe.BodyDetection>,  // Simplified - no landmarks needed!
+        bodies: List<BodyDetectorMediaPipe.BodyDetection>,
         orientations: Map<String, String> = emptyMap()
     ): Map<String, GenderResult> {
         val results = mutableMapOf<String, GenderResult>()
 
+        Log.d(TAG, "Classifying ${bodies.size} bodies")
+
         for (body in bodies) {
-            val orientation = "frontal" // Default since we don't have landmarks
+            val orientation = orientations[body.id] ?: "frontal"
             val result = classifyGender(bitmap, body.boundingBox, body.id, orientation)
             results[body.id] = result
         }
@@ -163,12 +148,12 @@ class GenderClassifier(private val interpreter: Interpreter) {
         return results
     }
 
-
     /**
      * Clear cache
      */
     fun clearCache() {
         cache.evictAll()
+        Log.d(TAG, "Cache cleared")
     }
 
     /**

@@ -8,23 +8,9 @@ import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetector
-import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetectorResult
 import kotlin.math.max
 import kotlin.math.min
 
-/**
- * Person detector using MediaPipe Object Detection (EfficientDet-Lite0)
- *
- * DETECTS:
- * - People in any pose/orientation
- * - Bounding boxes with confidence scores
- *
- * ADVANTAGES over pose detection:
- * - 2-3x faster inference
- * - Works with partial occlusions
- * - Detects sitting, lying, back views
- * - Simpler output (just boxes)
- */
 class BodyDetectorMediaPipe(private val context: Context) {
 
     private var detector: ObjectDetector? = null
@@ -32,8 +18,8 @@ class BodyDetectorMediaPipe(private val context: Context) {
     companion object {
         private const val TAG = "BodyDetectorMediaPipe"
         private const val MODEL_NAME = "efficientdet_lite0.tflite"
-        private const val MIN_DETECTION_CONFIDENCE = 0.4f  // Adjust as needed
-        private const val MAX_RESULTS = 5  // Detect up to 5 people
+        private const val MIN_DETECTION_CONFIDENCE = 0.4f
+        private const val MAX_RESULTS = 5
     }
 
     data class BodyDetection(
@@ -42,9 +28,6 @@ class BodyDetectorMediaPipe(private val context: Context) {
         val id: String
     )
 
-    /**
-     * Initialize MediaPipe object detector
-     */
     fun initialize(): Boolean {
         return try {
             Log.d(TAG, "Initializing EfficientDet-Lite0 object detector...")
@@ -70,12 +53,6 @@ class BodyDetectorMediaPipe(private val context: Context) {
         }
     }
 
-    /**
-     * Detect people in image
-     *
-     * @param bitmap Input image
-     * @return List of detected people with bounding boxes
-     */
     fun detectBodies(bitmap: Bitmap): List<BodyDetection> {
         val mpDetector = detector ?: run {
             Log.e(TAG, "Detector is null!")
@@ -85,17 +62,22 @@ class BodyDetectorMediaPipe(private val context: Context) {
         return try {
             Log.d(TAG, "Starting detection on ${bitmap.width}x${bitmap.height} image")
 
-            // Convert to MediaPipe image format
-            val mpImage = BitmapImageBuilder(bitmap).build()
+            // CRITICAL FIX: Create a copy so MediaPipe doesn't recycle our bitmap
+            val bitmapCopy = bitmap.copy(Bitmap.Config.ARGB_8888, false)
 
-            // Run object detection (~30-40ms for int8)
+            // Convert to MediaPipe image format
+            val mpImage = BitmapImageBuilder(bitmapCopy).build()
+
+            // Run object detection
             val startTime = System.currentTimeMillis()
             val result = mpDetector.detect(mpImage)
             val detectionTime = System.currentTimeMillis() - startTime
 
             Log.d(TAG, "Detection completed in ${detectionTime}ms")
 
+            // NOW it's safe to close - only the copy gets recycled
             mpImage.close()
+            bitmapCopy.recycle()
 
             // Filter for "person" detections only
             val personDetections = result.detections().filter { detection ->
@@ -150,16 +132,10 @@ class BodyDetectorMediaPipe(private val context: Context) {
         }
     }
 
-    /**
-     * Generate unique ID for person
-     */
     private fun generateId(rect: RectF, index: Int): String {
         return "${rect.centerX().toInt()}_${rect.centerY().toInt()}_${rect.width().toInt()}_$index"
     }
 
-    /**
-     * Release resources
-     */
     fun close() {
         detector?.close()
         detector = null

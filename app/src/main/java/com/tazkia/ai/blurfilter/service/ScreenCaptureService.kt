@@ -22,6 +22,8 @@ import android.util.DisplayMetrics
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import com.tazkia.ai.blurfilter.R
+import com.tazkia.ai.blurfilter.ml.BodyDetectorMediaPipe
+import com.tazkia.ai.blurfilter.ml.GenderClassifier
 import com.tazkia.ai.blurfilter.ml.ModelManager
 import com.tazkia.ai.blurfilter.ui.MainActivity
 import com.tazkia.ai.blurfilter.utils.PreferenceManager
@@ -39,16 +41,18 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
+import android.os.Looper
 import android.util.Log
-import com.tazkia.ai.blurfilter.ml.BodyDetectorMediaPipe
 import com.tazkia.ai.blurfilter.utils.ImageUtils
 
 class ScreenCaptureService : Service() {
     private lateinit var prefManager: PreferenceManager
 
     private var lastProcessedBitmap: Bitmap? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var modelManager: ModelManager
     private var bodyDetector: BodyDetectorMediaPipe? = null
+    private var genderClassifier: GenderClassifier? = null
     private var overlayService: OverlayService? = null
     private var renderScript: RenderScript? = null
     private var mediaProjection: MediaProjection? = null
@@ -101,10 +105,18 @@ class ScreenCaptureService : Service() {
             }
 
             bodyDetector = modelManager.getBodyDetector()
+            genderClassifier = modelManager.getGenderClassifier()
+
             if (bodyDetector == null) {
-                Log.e(TAG, "Body detector is null")
+                Log.e(TAG, "Body detector is null - cannot continue")
                 stopSelf()
                 return
+            }
+
+            if (genderClassifier == null) {
+                Log.w(TAG, "⚠️ Gender classifier not available - will blur ALL detected people")
+            } else {
+                Log.d(TAG, "✅ Gender classifier available - will filter by gender")
             }
 
             val windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
@@ -131,13 +143,8 @@ class ScreenCaptureService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d(TAG, "onStartCommand")
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(NOTIFICATION_ID, createNotification(),
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
-        } else {
-            startForeground(NOTIFICATION_ID, createNotification())
-        }
 
+        // CRITICAL: Extract data BEFORE starting foreground
         val mediaProjectionData = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             intent?.getParcelableExtra("mediaProjectionData", Intent::class.java)
         } else {
@@ -151,6 +158,17 @@ class ScreenCaptureService : Service() {
             return START_NOT_STICKY
         }
 
+        // Start foreground BEFORE media projection
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(NOTIFICATION_ID, createNotification(),
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+        } else {
+            startForeground(NOTIFICATION_ID, createNotification())
+        }
+
+        Log.d(TAG, "Service is now in foreground")
+
+        // NOW start media projection (after foreground started)
         startMediaProjection(mediaProjectionData)
         startProcessing()
         return START_STICKY
@@ -243,14 +261,25 @@ class ScreenCaptureService : Service() {
             var bitmap: Bitmap? = null
 
             try {
-                image = imageReader?.acquireLatestImage() ?: return
+                image = imageReader?.acquireLatestImage()
+                if (image == null) {
+                    Log.w(TAG, "No image available")
+                    return
+                }
+
                 bitmap = imageToBitmap(image)
                 image.close()
+                image = null
 
                 frameCount++
+                Log.d(TAG, "Processing frame $frameCount, bitmap: ${bitmap.width}x${bitmap.height}")
+
                 processFrame(bitmap) // processFrame handles bitmap recycling
+                bitmap = null // Mark as transferred to processFrame
+
             } catch (e: Exception) {
                 Log.e(TAG, "Error in captureAndProcess", e)
+                e.printStackTrace()
                 bitmap?.recycle() // Only recycle on error
             } finally {
                 image?.close()
@@ -261,138 +290,212 @@ class ScreenCaptureService : Service() {
 
     private fun processFrame(bitmap: Bitmap) {
         try {
-            if (bitmap.isRecycled) return
+            Log.d(TAG, "processFrame: bitmap ${bitmap.width}x${bitmap.height}, isRecycled=${bitmap.isRecycled}")
 
-            val detector = bodyDetector ?: return
+            // Detect all people
+            val allBodies = bodyDetector?.detectBodies(bitmap) ?: emptyList()
 
-            // 1. Detection (performed at 360px resolution)
-            val detectionBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, false)
-            val bodies = detector.detectBodies(detectionBitmap)
-            detectionBitmap.recycle()
+            Log.d(TAG, "After detection: bitmap isRecycled=${bitmap.isRecycled}")
 
-            if (bodies.isEmpty()) {
-                overlayService?.clearBlur()
-                bitmap.recycle() // Recycle if nothing to blur
+            if (allBodies.isEmpty()) {
+                mainHandler.post {
+                    overlayService?.clearBlur()
+                }
+                bitmap.recycle()
                 return
             }
 
-            // 2. Generate the blurred bitmap
-            // We do this on the 360px bitmap for speed
-            val blurredBitmap = applyBlurToRegions(bitmap, bodies)
+            // Classify gender and filter based on user preference
+            val filteredBodies = if (genderClassifier != null) {
+                Log.d(TAG, "Classifying gender for ${allBodies.size} people")
 
-            // 3. SCALE coordinates for the Overlay (360px -> Full Screen)
-            // FIX: Use RectF here to match your BodyDetection class type
-            val screenRegions = bodies.map { body ->
+                val genderResults = genderClassifier!!.classifyBatch(bitmap, allBodies)
+
+                // Get target gender from settings
+                val targetGender = when (prefManager.filterTarget) {
+                    PreferenceManager.FILTER_WOMEN -> GenderClassifier.GENDER_FEMALE
+                    PreferenceManager.FILTER_MEN -> GenderClassifier.GENDER_MALE
+                    else -> GenderClassifier.GENDER_FEMALE
+                }
+
+                // Filter: keep only people matching target gender
+                allBodies.filter { body ->
+                    val genderResult = genderResults[body.id]
+                    val shouldBlur = genderResult?.gender == targetGender
+
+                    Log.d(TAG, "Person ${body.id}: gender=${genderResult?.gender}, confidence=${genderResult?.confidence}, blur=$shouldBlur")
+
+                    shouldBlur
+                }
+            } else {
+                Log.w(TAG, "No gender classifier - blurring all people")
+                allBodies
+            }
+
+            Log.d(TAG, "Filtering: ${allBodies.size} detected → ${filteredBodies.size} to blur (target: ${prefManager.filterTarget})")
+
+            if (filteredBodies.isEmpty()) {
+                mainHandler.post {
+                    overlayService?.clearBlur()
+                }
+                bitmap.recycle()
+                return
+            }
+
+            // Create blurred bitmap - bitmap must NOT be recycled here
+            val blurredResult = applyBlurToRegions(bitmap, filteredBodies)
+
+            // NOW recycle the original
+            bitmap.recycle()
+
+            // Calculate screen coordinates
+            val displayMetrics = this.resources.displayMetrics
+            val screenWidth = displayMetrics.widthPixels.toFloat()
+            val screenHeight = displayMetrics.heightPixels.toFloat()
+
+            val scaleX = screenWidth / blurredResult.width.toFloat()
+            val scaleY = screenHeight / blurredResult.height.toFloat()
+
+            val screenRegions = filteredBodies.map { detection ->
+                val box = detection.boundingBox
                 RectF(
-                    body.boundingBox.left * scaleX,
-                    body.boundingBox.top * scaleY,
-                    body.boundingBox.right * scaleX,
-                    body.boundingBox.bottom * scaleY
+                    (box.left * scaleX).coerceAtLeast(0f),
+                    (box.top * scaleY).coerceAtLeast(0f),
+                    (box.right * scaleX).coerceAtMost(screenWidth),
+                    (box.bottom * scaleY).coerceAtMost(screenHeight)
                 )
             }
 
-            // 4. Update the overlay with the processed frame
-            overlayService?.updateBlur(blurredBitmap, screenRegions)
+            val paddedScreenRegions = screenRegions.map { region ->
+                val paddingX = region.width() * 0.2f
+                val paddingY = region.height() * 0.2f
+                RectF(
+                    (region.left - paddingX).coerceAtLeast(0f),
+                    (region.top - paddingY).coerceAtLeast(0f),
+                    (region.right + paddingX).coerceAtMost(screenWidth),
+                    (region.bottom + paddingY).coerceAtMost(screenHeight)
+                )
+            }
 
-            // 5. Managed Recycling:
-            // Your capture 'bitmap' is no longer needed because we have 'blurredBitmap'
-            bitmap.recycle()
-
-            // NOTE: 'blurredBitmap' is recycled by the OverlayService
-            // when the NEXT frame arrives, so we don't recycle it here.
+            mainHandler.post {
+                Log.d(TAG, "Updating overlay: ${paddedScreenRegions.size} regions")
+                overlayService?.updateBlur(blurredResult, paddedScreenRegions)
+            }
 
         } catch (e: Exception) {
-            Log.e("ScreenCaptureService", "Error in processFrame", e)
-            if (!bitmap.isRecycled) bitmap.recycle()
+            Log.e(TAG, "Error in processFrame", e)
+            e.printStackTrace()
+            if (!bitmap.isRecycled) {
+                bitmap.recycle()
+            }
         }
     }
+
     private fun applyBlurToRegions(
         bitmap: Bitmap,
         regions: List<BodyDetectorMediaPipe.BodyDetection>
     ): Bitmap {
-        // 1. Create a result bitmap from the original capture
+        Log.d(TAG, "applyBlurToRegions: bitmap ${bitmap.width}x${bitmap.height}, isRecycled=${bitmap.isRecycled}, regions=${regions.size}")
+
+        if (bitmap.isRecycled) {
+            throw IllegalStateException("Cannot apply blur to recycled bitmap!")
+        }
+
+        // Create a copy to work with
         val result = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(result)
+
+        // Draw original as base
         canvas.drawBitmap(bitmap, 0f, 0f, null)
 
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             isFilterBitmap = true
         }
 
-        for (detection in regions) {
+        for ((index, detection) in regions.withIndex()) {
             try {
-                // 2. Map coordinates (ensure they stay inside the bitmap bounds)
-                val rect = Rect(
-                    detection.boundingBox.left.toInt().coerceIn(0, bitmap.width - 1),
-                    detection.boundingBox.top.toInt().coerceIn(0, bitmap.height - 1),
-                    detection.boundingBox.right.toInt().coerceIn(1, bitmap.width),
-                    detection.boundingBox.bottom.toInt().coerceIn(1, bitmap.height)
+                val box = detection.boundingBox
+
+                val paddingX = box.width() * 0.25f
+                val paddingY = box.height() * 0.25f
+
+                val paddedRect = Rect(
+                    (box.left - paddingX).coerceAtLeast(0f).toInt(),
+                    (box.top - paddingY).coerceAtLeast(0f).toInt(),
+                    (box.right + paddingX).coerceAtMost(bitmap.width.toFloat()).toInt(),
+                    (box.bottom + paddingY).coerceAtMost(bitmap.height.toFloat()).toInt()
                 )
 
-                if (rect.width() <= 0 || rect.height() <= 0) continue
+                if (paddedRect.width() <= 0 || paddedRect.height() <= 0) {
+                    Log.w(TAG, "Region $index has invalid size")
+                    continue
+                }
 
-                // 3. Crop the region to be blurred
-                val regionBitmap = ImageUtils.cropRegion(bitmap, rect)
+                Log.d(TAG, "Processing region $index: $paddedRect")
 
-                // 4. Apply Blur
-                val blurred = if (renderScript != null) {
-                    val blurRadius = 25
+                // Crop from the ORIGINAL bitmap (not result)
+                val regionBitmap = ImageUtils.cropRegion(bitmap, paddedRect)
+
+                val processedBitmap = if (renderScript != null) {
                     var temp = regionBitmap
-                    repeat(2) { // Double pass for stronger effect
-                        val blurredTemp = ImageUtils.applyRenderScriptBlur(renderScript!!, temp, blurRadius)
-                        // Safety: only recycle if a new instance was created
+                    repeat(3) {
+                        val blurred = ImageUtils.applyRenderScriptBlur(renderScript!!, temp, 25)
                         if (temp != regionBitmap) temp.recycle()
-                        temp = blurredTemp
+                        temp = blurred
                     }
                     temp
                 } else {
-                    val pixelSize = (prefManager.blurIntensity * 2) + 10
-                    ImageUtils.applyPixelation(regionBitmap, pixelSize)
+                    ImageUtils.applyPixelation(regionBitmap, 40)
                 }
 
-                // 5. Draw the blurred region onto our canvas
-                canvas.drawBitmap(blurred, rect.left.toFloat(), rect.top.toFloat(), paint)
+                // Draw blurred region
+                canvas.drawBitmap(processedBitmap, null, RectF(paddedRect), paint)
 
-                // 6. Cleanup local temporary bitmaps
-                if (blurred != regionBitmap) {
-                    blurred.recycle()
+                // Cleanup
+                if (processedBitmap != regionBitmap && !processedBitmap.isRecycled) {
+                    processedBitmap.recycle()
                 }
                 regionBitmap.recycle()
 
             } catch (e: Exception) {
-                Log.e("ScreenCaptureService", "Error blurring region", e)
+                Log.e(TAG, "Failed to blur region $index", e)
             }
         }
 
+        Log.d(TAG, "Blur complete, returning result bitmap")
         return result
     }
+
     private fun imageToBitmap(image: Image): Bitmap {
-        val planes = image.planes
-        val buffer = planes[0].buffer
-        val pixelStride = planes[0].pixelStride
-        val rowStride = planes[0].rowStride
+        val plane = image.planes[0]
+        val buffer = plane.buffer
+        val pixelStride = plane.pixelStride
+        val rowStride = plane.rowStride
         val width = image.width
         val height = image.height
 
-        // Calculate stride padding
-        val rowPadding = rowStride - pixelStride * width
+        // Calculate row padding
+        val rowPadding = rowStride - (pixelStride * width)
 
-        // Create the full bitmap (includes potential empty padding on the right)
-        val fullBitmap = Bitmap.createBitmap(
+        // Create bitmap matching the stride
+        val strideBitmap = Bitmap.createBitmap(
             width + rowPadding / pixelStride,
             height,
             Bitmap.Config.ARGB_8888
         )
-        fullBitmap.copyPixelsFromBuffer(buffer)
+        strideBitmap.copyPixelsFromBuffer(buffer)
 
-        // Extract the "clean" image area (removing the padding)
-        val cleanBitmap = Bitmap.createBitmap(fullBitmap, 0, 0, width, height)
+        // CRITICAL FIX: Copy pixels to a new bitmap, don't use createBitmap reference
+        val cleanBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(cleanBitmap)
+        canvas.drawBitmap(strideBitmap, 0f, 0f, null)
 
-        // Recycle the temporary padded bitmap immediately
-        fullBitmap.recycle()
+        // NOW it's safe to recycle the stride bitmap
+        strideBitmap.recycle()
 
         return cleanBitmap
     }
+
     private fun createNotification(): Notification {
         createNotificationChannel()
 

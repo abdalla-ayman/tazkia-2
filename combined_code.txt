@@ -295,12 +295,9 @@ class BodyDetectorMediaPipe(private val context: Context) {
             mpImage.close()
 
             // Filter for "person" detections only
-            val personDetections = result.detections()
-                .filter { detection ->
-                    detection.categories().any { category ->
-                        category.categoryName().equals("person", ignoreCase = true)
-                    }
-                }
+            val personDetections = result.detections().filter { detection ->
+                detection.categories().any { it.categoryName().equals("person", ignoreCase = true) }
+            }
 
             Log.d(TAG, "Found ${personDetections.size} person(s)")
 
@@ -437,12 +434,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
-import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Paint
 import android.graphics.PixelFormat
-import android.graphics.Rect
-import android.graphics.RectF
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.Image
@@ -455,14 +447,11 @@ import android.os.HandlerThread
 import android.os.IBinder
 import android.renderscript.RenderScript
 import android.util.DisplayMetrics
-import android.util.Log
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import com.tazkia.ai.blurfilter.R
-import com.tazkia.ai.blurfilter.ml.BodyDetectorMediaPipe
 import com.tazkia.ai.blurfilter.ml.ModelManager
 import com.tazkia.ai.blurfilter.ui.MainActivity
-import com.tazkia.ai.blurfilter.utils.ImageUtils
 import com.tazkia.ai.blurfilter.utils.PreferenceManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -473,9 +462,21 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Rect
+import android.graphics.RectF
+import android.os.Looper
+import android.util.Log
+import com.tazkia.ai.blurfilter.ml.BodyDetectorMediaPipe
+import com.tazkia.ai.blurfilter.utils.ImageUtils
 
 class ScreenCaptureService : Service() {
     private lateinit var prefManager: PreferenceManager
+
+    private var lastProcessedBitmap: Bitmap? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var modelManager: ModelManager
     private var bodyDetector: BodyDetectorMediaPipe? = null
     private var overlayService: OverlayService? = null
@@ -560,7 +561,12 @@ class ScreenCaptureService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d(TAG, "onStartCommand")
-        startForeground(NOTIFICATION_ID, createNotification())
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(NOTIFICATION_ID, createNotification(),
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+        } else {
+            startForeground(NOTIFICATION_ID, createNotification())
+        }
 
         val mediaProjectionData = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             intent?.getParcelableExtra("mediaProjectionData", Intent::class.java)
@@ -684,61 +690,59 @@ class ScreenCaptureService : Service() {
     }
 
     private fun processFrame(bitmap: Bitmap) {
-        try {
-            if (frameCount % 10 == 0) {
-                Log.d(TAG, "Processing frame #$frameCount")
-            }
+        // Safe detection (bodyDetector may be null)
+        val bodies = bodyDetector?.detectBodies(bitmap) ?: emptyList()
 
-            if (bitmap.isRecycled) {
-                Log.e(TAG, "Bitmap already recycled at start of processFrame!")
-                return
-            }
-
-            val detector = bodyDetector ?: return
-
-            // Detect bodies - Create copy for detection to avoid recycling issues
-            val detectionBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, false)
-            val bodies = detector.detectBodies(detectionBitmap)
-            detectionBitmap.recycle()
-
-            if (bodies.isEmpty()) {
+        if (bodies.isEmpty()) {
+            mainHandler.post {
                 overlayService?.clearBlur()
-                return
             }
+            return
+        }
 
-            if (frameCount % 10 == 0) {
-                Log.d(TAG, "Found ${bodies.size} bodies")
-            }
+        // Create the blurred low-res bitmap
+        val blurredResult = applyBlurToRegions(bitmap, bodies)
 
-            // Apply blur - bitmap still alive here
-            val blurredBitmap = applyBlurToRegions(bitmap, bodies)
+        // Get actual screen size using the service as Context
+        val displayMetrics = this.resources.displayMetrics
+        val screenWidth = displayMetrics.widthPixels.toFloat()
+        val screenHeight = displayMetrics.heightPixels.toFloat()
 
-            // Convert coords to screen space
-            val screenRegions = bodies.map { body ->
-                RectF(
-                    body.boundingBox.left * scaleX,
-                    body.boundingBox.top * scaleY,
-                    body.boundingBox.right * scaleX,
-                    body.boundingBox.bottom * scaleY
-                )
-            }
+        // Calculate scale from capture resolution to screen
+        val scaleX = screenWidth / bitmap.width.toFloat()
+        val scaleY = screenHeight / bitmap.height.toFloat()
 
-            // Update overlay
-            overlayService?.updateBlur(blurredBitmap, screenRegions)
+        // Scale bounding boxes to full screen coordinates
+        val screenRegions = bodies.map { detection ->
+            val box = detection.boundingBox
 
-            Log.d(TAG, "Blur updated successfully with ${bodies.size} regions")
+            val left = (box.left * scaleX).coerceAtLeast(0f)
+            val top = (box.top * scaleY).coerceAtLeast(0f)
+            val right = (box.right * scaleX).coerceAtMost(screenWidth)
+            val bottom = (box.bottom * scaleY).coerceAtMost(screenHeight)
 
-        } catch (e: Exception) {
-            Log.e(TAG, "Error in processFrame", e)
-            e.printStackTrace()
-            overlayService?.clearBlur()
-        } finally {
-            if (!bitmap.isRecycled) {
-                bitmap.recycle()
-            }
+            RectF(left, top, right, bottom)
+        }
+
+        // Add 20% padding in screen coordinates for better coverage
+        val paddedScreenRegions = screenRegions.map { region ->
+            val paddingX = region.width() * 0.2f
+            val paddingY = region.height() * 0.2f
+
+            RectF(
+                (region.left - paddingX).coerceAtLeast(0f),
+                (region.top - paddingY).coerceAtLeast(0f),
+                (region.right + paddingX).coerceAtMost(screenWidth),
+                (region.bottom + paddingY).coerceAtMost(screenHeight)
+            )
+        }
+
+        // Update overlay on main thread
+        mainHandler.post {
+            Log.d("ScreenCaptureService", "Updating overlay with ${paddedScreenRegions.size} padded regions")
+            overlayService?.updateBlur(blurredResult, paddedScreenRegions)
         }
     }
-
     private fun applyBlurToRegions(
         bitmap: Bitmap,
         regions: List<BodyDetectorMediaPipe.BodyDetection>
@@ -753,72 +757,77 @@ class ScreenCaptureService : Service() {
 
         for (detection in regions) {
             try {
-                val rect = Rect(
-                    detection.boundingBox.left.toInt().coerceIn(0, bitmap.width - 1),
-                    detection.boundingBox.top.toInt().coerceIn(0, bitmap.height - 1),
-                    detection.boundingBox.right.toInt().coerceIn(1, bitmap.width),
-                    detection.boundingBox.bottom.toInt().coerceIn(1, bitmap.height)
+                val box = detection.boundingBox
+
+                val paddingX = box.width() * 0.25f
+                val paddingY = box.height() * 0.25f
+
+                val paddedLeft = (box.left - paddingX).coerceAtLeast(0f)
+                val paddedTop = (box.top - paddingY).coerceAtLeast(0f)
+                val paddedRight = (box.right + paddingX).coerceAtMost(bitmap.width.toFloat())
+                val paddedBottom = (box.bottom + paddingY).coerceAtMost(bitmap.height.toFloat())
+
+                val paddedRect = Rect(
+                    paddedLeft.toInt(),
+                    paddedTop.toInt(),
+                    paddedRight.toInt(),
+                    paddedBottom.toInt()
                 )
 
-                if (rect.width() <= 0 || rect.height() <= 0) continue
+                if (paddedRect.width() <= 0 || paddedRect.height() <= 0) continue
 
-                val regionBitmap = ImageUtils.cropRegion(bitmap, rect)
+                val regionBitmap = ImageUtils.cropRegion(bitmap, paddedRect)
 
-                // Apply strong blur
-                val blurred = if (renderScript != null) {
-                    val blurRadius = 25
+                val processedBitmap = if (renderScript != null) {
                     var temp = regionBitmap
-                    repeat(2) { // 2 passes for stronger blur
-                        val blurredTemp = ImageUtils.applyRenderScriptBlur(renderScript!!, temp, blurRadius)
+                    repeat(3) { // Very strong blur
+                        val blurred = ImageUtils.applyRenderScriptBlur(renderScript!!, temp, 35) // Int radius
                         if (temp != regionBitmap) temp.recycle()
-                        temp = blurredTemp
+                        temp = blurred
                     }
                     temp
                 } else {
-                    val pixelSize = (prefManager.blurIntensity * 2) + 10
-                    ImageUtils.applyPixelation(regionBitmap, pixelSize)
+                    ImageUtils.applyPixelation(regionBitmap, 40) // Very visible fallback
                 }
 
-                // Draw blurred region
-                canvas.drawBitmap(blurred, rect.left.toFloat(), rect.top.toFloat(), paint)
+                canvas.drawBitmap(processedBitmap, null, RectF(paddedRect), paint)
 
-                // Add dark overlay for extra privacy
-                val overlayPaint = Paint().apply {
-                    color = android.graphics.Color.argb(80, 0, 0, 0)
+                if (processedBitmap != regionBitmap && !processedBitmap.isRecycled) {
+                    processedBitmap.recycle()
                 }
-                canvas.drawRect(rect, overlayPaint)
-
                 regionBitmap.recycle()
-                blurred.recycle()
+
             } catch (e: Exception) {
-                Log.e(TAG, "Error blurring region", e)
+                Log.e("ScreenCaptureService", "Failed to blur region", e)
             }
         }
 
         return result
     }
-
     private fun imageToBitmap(image: Image): Bitmap {
-        val planes = image.planes
-        val buffer = planes[0].buffer
-        val pixelStride = planes[0].pixelStride
-        val rowStride = planes[0].rowStride
-        val rowPadding = rowStride - pixelStride * image.width
+        val plane = image.planes[0]
+        val buffer = plane.buffer
+        val pixelStride = plane.pixelStride
+        val rowStride = plane.rowStride
+        val width = image.width
+        val height = image.height
 
-        val bitmap = Bitmap.createBitmap(
-            image.width + rowPadding / pixelStride,
-            image.height,
+        // 1. Create bitmap matching the 'Stride' (not width)
+        val rowPadding = rowStride - (pixelStride * width)
+        val strideBitmap = Bitmap.createBitmap(
+            width + rowPadding / pixelStride,
+            height,
             Bitmap.Config.ARGB_8888
         )
-        bitmap.copyPixelsFromBuffer(buffer)
+        strideBitmap.copyPixelsFromBuffer(buffer)
 
-        return if (rowPadding == 0) {
-            bitmap
-        } else {
-            val cropped = Bitmap.createBitmap(bitmap, 0, 0, image.width, image.height)
-            bitmap.recycle()
-            cropped
-        }
+        // 2. CROP to the actual screen width to remove the "garbage" pixels
+        val cleanBitmap = Bitmap.createBitmap(strideBitmap, 0, 0, width, height)
+
+        // 3. Cleanup the messy one
+        strideBitmap.recycle()
+
+        return cleanBitmap
     }
 
     private fun createNotification(): Notification {
@@ -926,172 +935,117 @@ class AccessibilityMonitorService : AccessibilityService() {
 --- FILE: app/src/main/java/com/tazkia/ai/blurfilter/service/OverlayService.kt ---
 
 
+// Full file — replace entirely
 package com.tazkia.ai.blurfilter.service
 
-import android.app.Service
 import android.content.Context
-import android.content.Intent
-import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Paint
-import android.graphics.PixelFormat
-import android.graphics.Rect
-import android.graphics.RectF
-import android.os.Build
-import android.os.IBinder
+import android.graphics.*
 import android.util.Log
-import android.view.View
-import android.view.WindowManager
+import android.view.*
 
-class OverlayService : Service() {
-    private var windowManager: WindowManager? = null
+class OverlayService {
+
     private var overlayView: OverlayView? = null
-    private var isShowing = false
-
-    companion object {
-        private const val TAG = "OverlayService"
-    }
+    private var windowManager: WindowManager? = null
 
     fun start(context: Context) {
-        try {
-            Log.d(TAG, "Starting overlay")
-            windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-            overlayView = OverlayView(context)
+        if (overlayView != null) return
 
-            val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        overlayView = OverlayView(context)
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O)
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-            } else {
-                @Suppress("DEPRECATION")
-                WindowManager.LayoutParams.TYPE_SYSTEM_ALERT
-            }
+            else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+            PixelFormat.TRANSLUCENT
+        )
 
-            val params = WindowManager.LayoutParams(
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.MATCH_PARENT,
-                layoutType,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                        WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-                PixelFormat.TRANSLUCENT
-            )
-
+        try {
             windowManager?.addView(overlayView, params)
-            isShowing = true
-            Log.d(TAG, "Overlay started")
+            Log.d("OverlayService", "Overlay started")
         } catch (e: Exception) {
-            Log.e(TAG, "Error starting overlay", e)
-            isShowing = false
+            Log.e("OverlayService", "Failed to start overlay", e)
         }
     }
 
-    fun updateBlur(blurredBitmap: Bitmap?, regions: List<RectF>) {
-        overlayView?.updateBlur(blurredBitmap, regions)
+    fun updateBlur(bitmap: Bitmap?, regions: List<RectF>) {
+        overlayView?.updateData(bitmap, regions)
     }
 
     fun clearBlur() {
-        overlayView?.clearBlur()
+        overlayView?.updateData(null, emptyList())
     }
 
     fun stop() {
-        Log.d(TAG, "Stopping overlay")
-        if (isShowing && overlayView != null) {
-            try {
-                windowManager?.removeView(overlayView)
-            } catch (e: Exception) {
-                Log.e(TAG, "Error removing overlay", e)
-            } finally {
-                isShowing = false
-            }
-        }
-        overlayView?.cleanup()
+        overlayView?.let { windowManager?.removeView(it) }
         overlayView = null
         windowManager = null
     }
 
-    private class OverlayView(context: Context) : View(context) {
-        private var blurredBitmap: Bitmap? = null
-        private var blurRegions = emptyList<RectF>()
-        private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            isFilterBitmap = true
+    inner class OverlayView(context: Context) : View(context) {
+
+        private var currentBitmap: Bitmap? = null
+        private var blurRegions: List<RectF> = emptyList()
+
+        init {
+            setLayerType(LAYER_TYPE_HARDWARE, null)
         }
 
-        fun updateBlur(bitmap: Bitmap?, regions: List<RectF>) {
-            post {
-                try {
-                    // Clean up old bitmap
-                    blurredBitmap?.recycle()
+        fun updateData(newBitmap: Bitmap?, newRegions: List<RectF>) {
+            val old = currentBitmap
+            currentBitmap = newBitmap
+            blurRegions = newRegions
 
-                    blurredBitmap = bitmap
-                    blurRegions = regions.toList()
-
-                    if (regions.isNotEmpty()) {
-                        Log.d(TAG, "Updated blur with ${regions.size} regions")
-                    }
-
-                    invalidate()
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error updating blur", e)
-                }
+            if (old != null && old != newBitmap && !old.isRecycled) {
+                post { old.recycle() }
             }
-        }
 
-        fun clearBlur() {
-            post {
-                try {
-                    blurredBitmap?.recycle()
-                    blurredBitmap = null
-                    blurRegions = emptyList()
-                    invalidate()
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error clearing blur", e)
-                }
-            }
-        }
-
-        fun cleanup() {
-            blurredBitmap?.recycle()
-            blurredBitmap = null
-            blurRegions = emptyList()
+            postInvalidate()
         }
 
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
 
-            val bitmap = blurredBitmap ?: return
+            // Confirmation shapes — you already see these
+            canvas.drawCircle(150f, 150f, 100f, Paint().apply { color = Color.GREEN })
+            canvas.drawRect(
+                width - 300f, height - 300f, width.toFloat(), height.toFloat(),
+                Paint().apply { color = Color.BLUE; alpha = 180 }
+            )
+
+            val bitmap = currentBitmap ?: return
             if (bitmap.isRecycled || blurRegions.isEmpty()) return
 
-            try {
-                // Calculate scale from processing bitmap to screen
-                val bitmapScaleX = width.toFloat() / bitmap.width
-                val bitmapScaleY = height.toFloat() / bitmap.height
+            val blurPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                isFilterBitmap = true
+            }
 
-                for (region in blurRegions) {
-                    // Convert screen-space region back to bitmap coordinates
-                    val bitmapLeft = (region.left / bitmapScaleX).toInt().coerceIn(0, bitmap.width - 1)
-                    val bitmapTop = (region.top / bitmapScaleY).toInt().coerceIn(0, bitmap.height - 1)
-                    val bitmapRight = (region.right / bitmapScaleX).toInt().coerceIn(1, bitmap.width)
-                    val bitmapBottom = (region.bottom / bitmapScaleY).toInt().coerceIn(1, bitmap.height)
+            val borderPaint = Paint().apply {
+                color = Color.RED
+                style = Paint.Style.STROKE
+                strokeWidth = 20f
+                isAntiAlias = true
+            }
 
-                    if (bitmapRight <= bitmapLeft || bitmapBottom <= bitmapTop) continue
+            val fullSrcRect = Rect(0, 0, bitmap.width, bitmap.height)
 
-                    val srcRect = Rect(bitmapLeft, bitmapTop, bitmapRight, bitmapBottom)
+            for (region in blurRegions) {
+                // Thick red border
+                canvas.drawRect(region, borderPaint)
 
-                    // Draw to screen-space region directly
-                    canvas.drawBitmap(bitmap, srcRect, region, paint)
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error drawing blur", e)
+                // Stretch the entire blurred low-res bitmap into the full-screen region
+                // This makes the blur extremely visible
+                canvas.drawBitmap(bitmap, fullSrcRect, region, blurPaint)
             }
         }
-
-        override fun onDetachedFromWindow() {
-            super.onDetachedFromWindow()
-            cleanup()
-        }
     }
-
-    override fun onBind(intent: Intent?): IBinder? = null
 }
 
 
@@ -1701,28 +1655,21 @@ object ImageUtils {
     /**
      * Apply pixelation effect (Alternative to blur)
      */
+// In ImageUtils.kt
     fun applyPixelation(bitmap: Bitmap, pixelSize: Int): Bitmap {
-        val width = bitmap.width
-        val height = bitmap.height
-        val result = Bitmap.createBitmap(width, height, bitmap.config)
+        val result = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(result)
         val paint = Paint()
 
-        val smallWidth = width / pixelSize
-        val smallHeight = height / pixelSize
+        // FIX: Use bitmap.width and bitmap.height
+        val smallWidth = Math.max(1, bitmap.width / pixelSize)
+        val smallHeight = Math.max(1, bitmap.height / pixelSize)
 
         val small = Bitmap.createScaledBitmap(bitmap, smallWidth, smallHeight, false)
-        canvas.drawBitmap(
-            small,
-            null,
-            Rect(0, 0, width, height),
-            paint
-        )
-
+        canvas.drawBitmap(small, null, Rect(0, 0, bitmap.width, bitmap.height), paint)
         small.recycle()
         return result
     }
-
     /**
      * Calculate perceptual hash for motion detection
      */

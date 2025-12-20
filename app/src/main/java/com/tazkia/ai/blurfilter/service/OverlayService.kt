@@ -1,167 +1,163 @@
 package com.tazkia.ai.blurfilter.service
 
-import android.app.Service
 import android.content.Context
-import android.content.Intent
-import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Paint
-import android.graphics.PixelFormat
-import android.graphics.Rect
-import android.graphics.RectF
-import android.os.Build
-import android.os.IBinder
+import android.graphics.*
 import android.util.Log
-import android.view.View
-import android.view.WindowManager
+import android.view.*
 
-class OverlayService : Service() {
-    private var windowManager: WindowManager? = null
+class OverlayService {
+
     private var overlayView: OverlayView? = null
-    private var isShowing = false
-
-    companion object {
-        private const val TAG = "OverlayService"
-    }
+    private var windowManager: WindowManager? = null
 
     fun start(context: Context) {
-        try {
-            Log.d(TAG, "Starting overlay")
-            windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-            overlayView = OverlayView(context)
+        if (overlayView != null) return
 
-            val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        overlayView = OverlayView(context)
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O)
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-            } else {
-                @Suppress("DEPRECATION")
-                WindowManager.LayoutParams.TYPE_SYSTEM_ALERT
-            }
+            else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+            PixelFormat.TRANSLUCENT
+        )
 
-            val params = WindowManager.LayoutParams(
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.MATCH_PARENT,
-                layoutType,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                        WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-                PixelFormat.TRANSLUCENT
-            )
-
+        try {
             windowManager?.addView(overlayView, params)
-            isShowing = true
-            Log.d(TAG, "Overlay started")
+            Log.d("OverlayService", "Overlay started")
         } catch (e: Exception) {
-            Log.e(TAG, "Error starting overlay", e)
-            isShowing = false
+            Log.e("OverlayService", "Failed to start overlay", e)
         }
     }
 
-    fun updateBlur(blurredBitmap: Bitmap?, regions: List<RectF>) {
-        overlayView?.updateBlur(blurredBitmap, regions)
+    fun updateBlur(bitmap: Bitmap?, regions: List<RectF>) {
+        overlayView?.updateData(bitmap, regions)
     }
 
     fun clearBlur() {
-        overlayView?.clearBlur()
+        overlayView?.updateData(null, emptyList())
     }
 
     fun stop() {
-        Log.d(TAG, "Stopping overlay")
-        if (isShowing && overlayView != null) {
-            try {
-                windowManager?.removeView(overlayView)
-            } catch (e: Exception) {
-                Log.e(TAG, "Error removing overlay", e)
-            } finally {
-                isShowing = false
-            }
-        }
-        overlayView?.cleanup()
+        overlayView?.let { windowManager?.removeView(it) }
         overlayView = null
         windowManager = null
     }
 
-    private class OverlayView(context: Context) : View(context) {
-        private var blurredBitmap: Bitmap? = null
-        private var blurRegions = emptyList<RectF>()
-        private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            isFilterBitmap = true
+    inner class OverlayView(context: Context) : View(context) {
+
+        private var currentBitmap: Bitmap? = null
+        private var blurRegions: List<RectF> = emptyList()
+
+        private val debugPaint = Paint().apply {
+            color = Color.RED
+            style = Paint.Style.STROKE
+            strokeWidth = 5f
         }
 
-        fun updateBlur(bitmap: Bitmap?, regions: List<RectF>) {
-            post {
-                try {
-                    // Clean up old bitmap
-                    blurredBitmap?.recycle()
+        private val textPaint = Paint().apply {
+            color = Color.YELLOW
+            textSize = 40f
+            style = Paint.Style.FILL
+        }
 
-                    blurredBitmap = bitmap
-                    blurRegions = regions.toList()
+        init {
+            setLayerType(LAYER_TYPE_HARDWARE, null)
+        }
 
-                    if (regions.isNotEmpty()) {
-                        Log.d(TAG, "Updated blur with ${regions.size} regions")
-                    }
+        fun updateData(newBitmap: Bitmap?, newRegions: List<RectF>) {
+            Log.d("OverlayView", "updateData: bitmap=${newBitmap?.width}x${newBitmap?.height}, regions=${newRegions.size}")
 
-                    invalidate()
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error updating blur", e)
-                }
+            val old = currentBitmap
+            currentBitmap = newBitmap
+            blurRegions = newRegions
+
+            if (old != null && old != newBitmap && !old.isRecycled) {
+                post { old.recycle() }
             }
-        }
 
-        fun clearBlur() {
-            post {
-                try {
-                    blurredBitmap?.recycle()
-                    blurredBitmap = null
-                    blurRegions = emptyList()
-                    invalidate()
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error clearing blur", e)
-                }
-            }
-        }
-
-        fun cleanup() {
-            blurredBitmap?.recycle()
-            blurredBitmap = null
-            blurRegions = emptyList()
+            postInvalidate()
         }
 
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
 
-            val bitmap = blurredBitmap ?: return
-            if (bitmap.isRecycled || blurRegions.isEmpty()) return
+            Log.d("OverlayView", "onDraw: regions=${blurRegions.size}, bitmap=${currentBitmap != null}")
 
-            try {
-                // Calculate scale from processing bitmap to screen
-                val bitmapScaleX = width.toFloat() / bitmap.width
-                val bitmapScaleY = height.toFloat() / bitmap.height
+            val bitmap = currentBitmap
+            if (bitmap == null || bitmap.isRecycled) {
+                Log.w("OverlayView", "No valid bitmap")
+                return
+            }
 
-                for (region in blurRegions) {
-                    // Convert screen-space region back to bitmap coordinates
-                    val bitmapLeft = (region.left / bitmapScaleX).toInt().coerceIn(0, bitmap.width - 1)
-                    val bitmapTop = (region.top / bitmapScaleY).toInt().coerceIn(0, bitmap.height - 1)
-                    val bitmapRight = (region.right / bitmapScaleX).toInt().coerceIn(1, bitmap.width)
-                    val bitmapBottom = (region.bottom / bitmapScaleY).toInt().coerceIn(1, bitmap.height)
+            if (blurRegions.isEmpty()) {
+                Log.w("OverlayView", "No regions")
+                return
+            }
 
-                    if (bitmapRight <= bitmapLeft || bitmapBottom <= bitmapTop) continue
+            val blurPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                isFilterBitmap = true
+            }
 
-                    val srcRect = Rect(bitmapLeft, bitmapTop, bitmapRight, bitmapBottom)
+            Log.d("OverlayView", "Screen: ${width}x${height}, Bitmap: ${bitmap.width}x${bitmap.height}")
 
-                    // Draw to screen-space region directly
-                    canvas.drawBitmap(bitmap, srcRect, region, paint)
+            // Calculate scale from bitmap to screen
+            val scaleX = width.toFloat() / bitmap.width.toFloat()
+            val scaleY = height.toFloat() / bitmap.height.toFloat()
+
+            Log.d("OverlayView", "Scale: x=$scaleX, y=$scaleY")
+
+            for ((index, screenRegion) in blurRegions.withIndex()) {
+                try {
+                    // Map screen region BACK to bitmap coordinates
+                    val bitmapRegion = RectF(
+                        screenRegion.left / scaleX,
+                        screenRegion.top / scaleY,
+                        screenRegion.right / scaleX,
+                        screenRegion.bottom / scaleY
+                    )
+
+                    // Clamp to bitmap bounds
+                    bitmapRegion.left = bitmapRegion.left.coerceIn(0f, bitmap.width.toFloat())
+                    bitmapRegion.top = bitmapRegion.top.coerceIn(0f, bitmap.height.toFloat())
+                    bitmapRegion.right = bitmapRegion.right.coerceIn(0f, bitmap.width.toFloat())
+                    bitmapRegion.bottom = bitmapRegion.bottom.coerceIn(0f, bitmap.height.toFloat())
+
+                    if (bitmapRegion.width() <= 0 || bitmapRegion.height() <= 0) {
+                        Log.w("OverlayView", "Invalid bitmap region: $bitmapRegion")
+                        continue
+                    }
+
+                    Log.d("OverlayView", "Region $index: screen=$screenRegion, bitmap=$bitmapRegion")
+
+                    // Draw the blurred region from bitmap to screen
+                    canvas.drawBitmap(
+                        bitmap,
+                        Rect(
+                            bitmapRegion.left.toInt(),
+                            bitmapRegion.top.toInt(),
+                            bitmapRegion.right.toInt(),
+                            bitmapRegion.bottom.toInt()
+                        ),
+                        screenRegion,
+                        blurPaint
+                    )
+
+                    // DEBUG: Draw border
+                    canvas.drawRect(screenRegion, debugPaint)
+                    canvas.drawText("BLUR #$index", screenRegion.left + 10, screenRegion.top + 50, textPaint)
+
+                } catch (e: Exception) {
+                    Log.e("OverlayView", "Error drawing region $index", e)
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error drawing blur", e)
             }
         }
-
-        override fun onDetachedFromWindow() {
-            super.onDetachedFromWindow()
-            cleanup()
-        }
     }
-
-    override fun onBind(intent: Intent?): IBinder? = null
 }
